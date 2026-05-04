@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM API Router 管理后台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- 登录模态框 -->
+    <div id="loginModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg p-8 w-full max-w-md">
+            <h2 class="text-2xl font-bold mb-6 text-center">欢迎使用 LLM API Router</h2>
+            <div class="mb-4">
+                <label class="block text-gray-700 text-sm font-bold mb-2">用户名</label>
+                <input id="username" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="请输入用户名">
+            </div>
+            <div class="mb-6">
+                <label class="block text-gray-700 text-sm font-bold mb-2">密码</label>
+                <input id="password" type="password" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="请输入密码">
+            </div>
+            <div class="flex gap-3">
+                <button id="loginBtn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    登录
+                </button>
+                <button id="registerBtn" class="flex-1 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-gray-500">
+                    注册
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增/编辑路由模态框 -->
+    <div id="routeModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg p-8 w-full max-w-2xl">
+            <h2 id="routeModalTitle" class="text-2xl font-bold mb-6">新增路由</h2>
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">模型名称 *</label>
+                    <input id="routeModel" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如: my-gpt-4">
+                </div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">服务商名称 *</label>
+                    <input id="routeProviderName" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如: openai">
+                </div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">API 地址 *</label>
+                    <input id="routeProviderBaseUrl" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如: https://api.openai.com">
+                </div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">API Key *</label>
+                    <input id="routeProviderApiKey" type="password" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="你的API Key">
+                </div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">服务商模型名 *</label>
+                    <input id="routeProviderModel" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="例如: gpt-4o">
+                </div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2">API 类型</label>
+                    <select id="routeProviderApiType" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="openai">OpenAI 兼容</option>
+                    </select>
+                </div>
+            </div>
+            <div class="flex gap-3 justify-end">
+                <button id="routeCancelBtn" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded-md">
+                    取消
+                </button>
+                <button id="routeSaveBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">
+                    保存
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Token管理模态框 -->
+    <div id="tokenModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white rounded-lg p-8 w-full max-w-lg">
+            <h2 class="text-2xl font-bold mb-2">我的 API Token</h2>
+            <p class="text-sm text-gray-500 mb-6">调用私有路由API时，使用此Token作为Bearer Token进行鉴权。格式：<code class="bg-gray-100 px-1 rounded">Authorization: Bearer &lt;token&gt;</code></p>
+            <div class="mb-4">
+                <label class="block text-gray-700 text-sm font-bold mb-2">API Token</label>
+                <div class="flex items-center gap-2">
+                    <input type="password" id="tokenInput" readonly class="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm font-mono bg-gray-50 focus:outline-none" value="">
+                    <button id="toggleTokenVisibilityBtn" class="bg-gray-200 hover:bg-gray-300 px-3 py-2 rounded-md text-sm" title="显示/隐藏">
+                        <i class="fa fa-eye"></i>
+                    </button>
+                    <button id="copyTokenBtn" class="bg-blue-500 hover:bg-blue-600 text-white px-3 py-2 rounded-md text-sm" title="复制">
+                        <i class="fa fa-copy mr-1"></i>复制
+                    </button>
+                </div>
+            </div>
+            <div class="mb-6 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                <p class="text-xs text-yellow-700"><i class="fa fa-exclamation-triangle mr-1"></i>请妥善保管Token，不要泄露给他人。如果Token已泄露，请立即重新生成。</p>
+            </div>
+            <div class="flex gap-3 justify-end">
+                <button id="regenerateTokenBtn" class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-4 rounded-md text-sm">
+                    <i class="fa fa-refresh mr-1"></i>重新生成
+                </button>
+                <button id="closeTokenModalBtn" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded-md text-sm">
+                    关闭
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 顶部导航 -->
+    <nav class="bg-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <i class="fa fa-rocket text-blue-600 text-2xl mr-3"></i>
+                    <h1 class="text-xl font-bold text-gray-900">LLM API Router 管理后台</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <span id="currentUser" class="text-gray-700"></span>
+                    <div class="relative">
+                        <button id="showTokenBtn" class="text-sm bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded-md flex items-center">
+                            <i class="fa fa-key mr-1"></i> 我的Token
+                        </button>
+                    </div>
+                    <button id="logoutBtn" class="text-sm bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-md">
+                        <i class="fa fa-sign-out mr-1"></i> 退出
+                    </button>
+                    <span id="health-status" class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+                        <i class="fa fa-circle text-green-500 mr-1 animate-pulse"></i> 服务正常
+                    </span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- 统计卡片 -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="bg-blue-100 rounded-full p-3 mr-4">
+                        <i class="fa fa-exchange text-blue-600 text-xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-500 mb-1">我的路由数</p>
+                        <p class="text-3xl font-bold text-gray-900" id="total-routes">0</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="bg-green-100 rounded-full p-3 mr-4">
+                        <i class="fa fa-server text-green-600 text-xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-500 mb-1">全局服务商</p>
+                        <p class="text-3xl font-bold text-gray-900" id="total-providers">0</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="bg-purple-100 rounded-full p-3 mr-4">
+                        <i class="fa fa-history text-purple-600 text-xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-500 mb-1">总调用次数</p>
+                        <p class="text-3xl font-bold text-gray-900" id="total-calls">0</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="bg-orange-100 rounded-full p-3 mr-4">
+                        <i class="fa fa-coins text-orange-600 text-xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-500 mb-1">总Token消耗</p>
+                        <p class="text-3xl font-bold text-gray-900" id="total-tokens">0</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 标签页 -->
+        <div class="bg-white rounded-lg shadow mb-8">
+            <div class="border-b border-gray-200">
+                <nav class="flex -mb-px">
+                    <button class="tab-btn active px-6 py-4 border-b-2 border-blue-600 text-blue-600 font-medium" data-tab="routes">
+                        <i class="fa fa-list mr-2"></i>我的路由
+                    </button>
+                    <button class="tab-btn px-6 py-4 border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700" data-tab="providers">
+                        <i class="fa fa-cloud mr-2"></i>全局服务商
+                    </button>
+                    <button class="tab-btn px-6 py-4 border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700" data-tab="logs">
+                        <i class="fa fa-history mr-2"></i>调用日志
+                    </button>
+                    <button class="tab-btn px-6 py-4 border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700" data-tab="charts">
+                        <i class="fa fa-bar-chart mr-2"></i>用量统计
+                    </button>
+                </nav>
+            </div>
+
+            <!-- 我的路由内容 -->
+            <div class="tab-content p-6" id="routes">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-medium text-gray-900">我的私有路由</h3>
+                    <button id="addRouteBtn" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <i class="fa fa-plus mr-1"></i> 新增路由
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">模型名称</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">服务商</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">服务商模型</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">API地址</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">创建时间</th>
+                                <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200" id="routes-table-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 服务商配置内容 -->
+            <div class="tab-content p-6 hidden" id="providers">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">服务商名称</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">API地址</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类型</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200" id="providers-table-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 调用日志内容 -->
+            <div class="tab-content p-6 hidden" id="logs">
+                <div class="mb-4 flex justify-between items-center">
+                    <div class="flex space-x-4">
+                        <select id="log-model-filter" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">所有模型</option>
+                        </select>
+                    </div>
+                    <div>
+                        <button id="refresh-logs" class="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <i class="fa fa-refresh mr-1"></i>刷新
+                        </button>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">时间</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">模型</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">服务商</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">总Token</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">耗时(ms)</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200" id="logs-table-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 用量统计内容 -->
+            <div class="tab-content p-6 hidden" id="charts">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <h3 class="text-lg font-medium text-gray-900 mb-4">各模型调用次数</h3>
+                        <div class="h-80">
+                            <canvas id="calls-chart"></canvas>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-medium text-gray-900 mb-4">各模型Token消耗</h3>
+                        <div class="h-80">
+                            <canvas id="tokens-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-8">
+                    <h3 class="text-lg font-medium text-gray-900 mb-4">详细统计</h3>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">模型</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">调用次数</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">输入Token</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">输出Token</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">总Token</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">平均耗时(ms)</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200" id="summary-table-body">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentEditingRouteId = null;
+
+        // 带Token的fetch封装
+        async function authFetch(url, options = {}) {
+            const token = localStorage.getItem("token");
+            if (!options.headers) options.headers = {};
+            if (token) {
+                options.headers["Authorization"] = `Bearer ${token}`;
+            }
+            const response = await fetch(url, options);
+            if (response.status === 401) {
+                // Token过期，清除并跳登录
+                localStorage.removeItem("token");
+                localStorage.removeItem("username");
+                showLoginModal();
+                throw new Error("未授权");
+            }
+            return response;
+        }
+
+        // 显示登录弹窗
+        function showLoginModal() {
+            document.getElementById("loginModal").classList.remove("hidden");
+        }
+
+        // 隐藏登录弹窗
+        function hideLoginModal() {
+            document.getElementById("loginModal").classList.add("hidden");
+        }
+
+        // 显示路由弹窗
+        function showRouteModal(isEdit = false) {
+            currentEditingRouteId = null;
+            document.getElementById("routeModalTitle").textContent = isEdit ? "编辑路由" : "新增路由";
+            // 清空表单
+            document.getElementById("routeModel").value = "";
+            document.getElementById("routeProviderName").value = "";
+            document.getElementById("routeProviderBaseUrl").value = "";
+            document.getElementById("routeProviderApiKey").value = "";
+            document.getElementById("routeProviderModel").value = "";
+            document.getElementById("routeProviderApiType").value = "openai";
+            document.getElementById("routeModal").classList.remove("hidden");
+        }
+
+        // 隐藏路由弹窗
+        function hideRouteModal() {
+            document.getElementById("routeModal").classList.add("hidden");
+            currentEditingRouteId = null;
+        }
+
+        // 填充编辑表单
+        function fillEditForm(route) {
+            currentEditingRouteId = route.id;
+            document.getElementById("routeModel").value = route.model;
+            document.getElementById("routeProviderName").value = route.provider_name;
+            document.getElementById("routeProviderBaseUrl").value = route.provider_base_url;
+            document.getElementById("routeProviderApiKey").value = ""; // 不填充API Key，避免泄露
+            document.getElementById("routeProviderModel").value = route.provider_model;
+            document.getElementById("routeProviderApiType").value = route.provider_api_type;
+            document.getElementById("routeModalTitle").textContent = "编辑路由";
+            document.getElementById("routeModal").classList.remove("hidden");
+        }
+
+        // 标签页切换
+        document.querySelectorAll(".tab-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const tabId = btn.dataset.tab;
+                
+                // 切换按钮状态
+                document.querySelectorAll(".tab-btn").forEach(b => {
+                    b.classList.remove("active", "border-blue-600", "text-blue-600");
+                    b.classList.add("border-transparent", "text-gray-500");
+                });
+                btn.classList.add("active", "border-blue-600", "text-blue-600");
+                btn.classList.remove("border-transparent", "text-gray-500");
+                
+                // 切换内容
+                document.querySelectorAll(".tab-content").forEach(content => {
+                    content.classList.add("hidden");
+                });
+                document.getElementById(tabId).classList.remove("hidden");
+                
+                if (tabId === "routes") loadUserRoutes();
+                if (tabId === "providers") loadProviders();
+                if (tabId === "logs") loadLogs();
+                if (tabId === "charts") loadCharts();
+            });
+        });
+
+        // 加载用户路由列表
+        async function loadUserRoutes() {
+            try {
+                const res = await authFetch("/v1/user/routes");
+                const data = await res.json();
+                const tbody = document.getElementById("routes-table-body");
+                tbody.innerHTML = "";
+                
+                data.routes.forEach(route => {
+                    const tr = document.createElement("tr");
+                    tr.innerHTML = `
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${route.model}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${route.provider_name}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${route.provider_model}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${route.provider_base_url}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${new Date(route.created_at).toLocaleString('zh-CN')}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                            <button data-id="${route.id}" class="edit-btn text-blue-600 hover:text-blue-900 mr-3">
+                                <i class="fa fa-edit"></i> 编辑
+                            </button>
+                            <button data-id="${route.id}" class="delete-btn text-red-600 hover:text-red-900">
+                                <i class="fa fa-trash"></i> 删除
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                
+                document.getElementById("total-routes").textContent = data.routes.length;
+
+                // 绑定编辑和删除事件
+                document.querySelectorAll(".edit-btn").forEach(btn => {
+                    btn.addEventListener("click", () => {
+                        const routeId = btn.dataset.id;
+                        const route = data.routes.find(r => r.id == routeId);
+                        fillEditForm(route);
+                    });
+                });
+
+                document.querySelectorAll(".delete-btn").forEach(btn => {
+                    btn.addEventListener("click", async () => {
+                        if (!confirm("确定要删除这个路由吗？")) return;
+                        const routeId = btn.dataset.id;
+                        try {
+                            const res = await authFetch(`/v1/user/routes/${routeId}`, { method: "DELETE" });
+                            if (res.ok) {
+                                alert("删除成功");
+                                loadUserRoutes();
+                            } else {
+                                const err = await res.json();
+                                alert(err.detail || "删除失败");
+                            }
+                        } catch (e) {
+                            alert("删除失败：" + e.message);
+                        }
+                    });
+                });
+            } catch (e) {
+                console.error("加载路由失败", e);
+            }
+        }
+
+        // 加载服务商配置
+        async function loadProviders() {
+            try {
+                const res = await authFetch("/v1/admin/providers");
+                const data = await res.json();
+                const tbody = document.getElementById("providers-table-body");
+                tbody.innerHTML = "";
+                
+                data.providers.forEach(provider => {
+                    const tr = document.createElement("tr");
+                    tr.innerHTML = `
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${provider.name}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${provider.base_url}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${provider.api_type}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                
+                document.getElementById("total-providers").textContent = data.providers.length;
+            } catch (e) {
+                console.error("加载服务商失败", e);
+            }
+        }
+
+        // 加载日志
+        async function loadLogs() {
+            try {
+                const model = document.getElementById("log-model-filter").value;
+                const url = `/v1/logs?limit=50${model ? `&model=${encodeURIComponent(model)}` : ""}`;
+                const res = await authFetch(url);
+                const data = await res.json();
+                const tbody = document.getElementById("logs-table-body");
+                tbody.innerHTML = "";
+                
+                data.data.forEach(log => {
+                    const tr = document.createElement("tr");
+                    const time = new Date(log.created_at).toLocaleString('zh-CN');
+                    const statusBadge = log.status === "success" 
+                        ? `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">成功</span>`
+                        : `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">失败</span>`;
+                    
+                    tr.innerHTML = `
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${time}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${log.model}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${log.provider || "-"}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${log.total_tokens || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${log.duration_ms || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${statusBadge}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (e) {
+                console.error("加载日志失败", e);
+            }
+        }
+
+        // 加载统计图表
+        async function loadCharts() {
+            try {
+                const res = await authFetch("/v1/logs/summary");
+                const data = await res.json();
+                const summary = data.data;
+                
+                const tbody = document.getElementById("summary-table-body");
+                tbody.innerHTML = "";
+                
+                let totalCalls = 0;
+                let totalTokens = 0;
+                const labels = [];
+                const callCounts = [];
+                const tokenCounts = [];
+                
+                summary.forEach(item => {
+                    const tr = document.createElement("tr");
+                    tr.innerHTML = `
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${item.model}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.call_count}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.total_prompt_tokens || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.total_completion_tokens || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.total_tokens || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${Math.round(item.avg_duration_ms || 0)}</td>
+                    `;
+                    tbody.appendChild(tr);
+                    
+                    labels.push(item.model);
+                    callCounts.push(item.call_count);
+                    tokenCounts.push(item.total_tokens || 0);
+                    totalCalls += item.call_count;
+                    totalTokens += item.total_tokens || 0;
+                });
+                
+                document.getElementById("total-calls").textContent = totalCalls;
+                document.getElementById("total-tokens").textContent = totalTokens;
+                
+                // 绘制调用次数图表
+                const callsCtx = document.getElementById("calls-chart").getContext("2d");
+                if (window.callsChart) window.callsChart.destroy();
+                window.callsChart = new Chart(callsCtx, {
+                    type: "bar",
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: "调用次数",
+                            data: callCounts,
+                            backgroundColor: "rgba(59, 130, 246, 0.7)",
+                            borderColor: "rgba(59, 130, 246, 1)",
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                });
+                
+                // 绘制Token消耗图表
+                const tokensCtx = document.getElementById("tokens-chart").getContext("2d");
+                if (window.tokensChart) window.tokensChart.destroy();
+                window.tokensChart = new Chart(tokensCtx, {
+                    type: "pie",
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: tokenCounts,
+                            backgroundColor: [
+                                "rgba(59, 130, 246, 0.7)",
+                                "rgba(16, 185, 129, 0.7)",
+                                "rgba(245, 158, 11, 0.7)",
+                                "rgba(139, 92, 246, 0.7)",
+                                "rgba(239, 68, 68, 0.7)",
+                                "rgba(14, 165, 233, 0.7)"
+                            ],
+                            borderColor: "#fff",
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: "right"
+                            }
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error("加载统计失败", e);
+            }
+        }
+
+        // 健康检查
+        async function checkHealth() {
+            try {
+                const res = await fetch("/health");
+                const statusEl = document.getElementById("health-status");
+                if (res.ok) {
+                    statusEl.className = "inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800";
+                    statusEl.innerHTML = '<i class="fa fa-circle text-green-500 mr-1 animate-pulse"></i> 服务正常';
+                } else {
+                    throw new Error("服务异常");
+                }
+            } catch (e) {
+                const statusEl = document.getElementById("health-status");
+                statusEl.className = "inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800";
+                statusEl.innerHTML = '<i class="fa fa-circle text-red-500 mr-1 animate-pulse"></i> 服务异常';
+            }
+        }
+
+        // 初始化
+        document.addEventListener("DOMContentLoaded", async () => {
+            // ============== 先绑定所有事件 ==============
+            // 登录按钮
+            document.getElementById("loginBtn").addEventListener("click", async () => {
+                const username = document.getElementById("username").value.trim();
+                const password = document.getElementById("password").value.trim();
+                if (!username || !password) {
+                    alert("请输入用户名和密码");
+                    return;
+                }
+
+                try {
+                    const res = await fetch("/login", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                        body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        localStorage.setItem("token", data.access_token);
+                        localStorage.setItem("username", username);
+                        hideLoginModal();
+                        document.getElementById("currentUser").textContent = `欢迎，${username}`;
+                        await loadUserRoutes();
+                        await loadProviders();
+                        await loadCharts();
+                    } else {
+                        const err = await res.json();
+                        alert(err.detail || "登录失败");
+                    }
+                } catch (e) {
+                    alert("登录失败：" + e.message);
+                }
+            });
+
+            // 注册按钮
+            document.getElementById("registerBtn").addEventListener("click", async () => {
+                const username = document.getElementById("username").value.trim();
+                const password = document.getElementById("password").value.trim();
+                if (!username || !password) {
+                    alert("请输入用户名和密码");
+                    return;
+                }
+
+                try {
+                    const res = await fetch("/register", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ username, password })
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        localStorage.setItem("token", data.access_token);
+                        localStorage.setItem("username", username);
+                        hideLoginModal();
+                        document.getElementById("currentUser").textContent = `欢迎，${username}`;
+                        alert("注册成功");
+                        await loadUserRoutes();
+                        await loadProviders();
+                        await loadCharts();
+                    } else {
+                        const err = await res.json();
+                        alert(err.detail || "注册失败");
+                    }
+                } catch (e) {
+                    alert("注册失败：" + e.message);
+                }
+            });
+
+            // 退出登录
+            document.getElementById("logoutBtn").addEventListener("click", () => {
+                localStorage.removeItem("token");
+                localStorage.removeItem("username");
+                window.location.reload();
+            });
+
+            // Token管理按钮
+            document.getElementById("showTokenBtn").addEventListener("click", () => {
+                const token = localStorage.getItem("token") || "";
+                document.getElementById("tokenInput").value = token;
+                document.getElementById("tokenInput").type = "password";
+                document.getElementById("toggleTokenVisibilityBtn").innerHTML = '<i class="fa fa-eye"></i>';
+                document.getElementById("tokenModal").classList.remove("hidden");
+            });
+
+            // 关闭Token模态框
+            document.getElementById("closeTokenModalBtn").addEventListener("click", () => {
+                document.getElementById("tokenModal").classList.add("hidden");
+            });
+
+            // 显示/隐藏Token
+            document.getElementById("toggleTokenVisibilityBtn").addEventListener("click", () => {
+                const input = document.getElementById("tokenInput");
+                const btn = document.getElementById("toggleTokenVisibilityBtn");
+                if (input.type === "password") {
+                    input.type = "text";
+                    btn.innerHTML = '<i class="fa fa-eye-slash"></i>';
+                } else {
+                    input.type = "password";
+                    btn.innerHTML = '<i class="fa fa-eye"></i>';
+                }
+            });
+
+            // 复制Token
+            document.getElementById("copyTokenBtn").addEventListener("click", async () => {
+                const token = document.getElementById("tokenInput").value;
+                if (!token) {
+                    alert("没有可复制的Token");
+                    return;
+                }
+                try {
+                    await navigator.clipboard.writeText(token);
+                    const btn = document.getElementById("copyTokenBtn");
+                    const originalHtml = btn.innerHTML;
+                    btn.innerHTML = '<i class="fa fa-check mr-1"></i>已复制';
+                    btn.classList.remove("bg-blue-500", "hover:bg-blue-600");
+                    btn.classList.add("bg-green-500", "hover:bg-green-600");
+                    setTimeout(() => {
+                        btn.innerHTML = originalHtml;
+                        btn.classList.remove("bg-green-500", "hover:bg-green-600");
+                        btn.classList.add("bg-blue-500", "hover:bg-blue-600");
+                    }, 2000);
+                } catch (e) {
+                    const input = document.getElementById("tokenInput");
+                    input.type = "text";
+                    input.select();
+                    document.execCommand("copy");
+                    input.type = "password";
+                    alert("Token已复制到剪贴板");
+                }
+            });
+
+            // 重新生成Token
+            document.getElementById("regenerateTokenBtn").addEventListener("click", async () => {
+                if (!confirm("重新生成Token后，旧Token将立即失效。确定要重新生成吗？")) return;
+                try {
+                    const res = await authFetch("/v1/user/token/regenerate", { method: "POST" });
+                    if (res.ok) {
+                        const data = await res.json();
+                        localStorage.setItem("token", data.access_token);
+                        document.getElementById("tokenInput").value = data.access_token;
+                        const btn = document.getElementById("regenerateTokenBtn");
+                        const originalHtml = btn.innerHTML;
+                        btn.innerHTML = '<i class="fa fa-check mr-1"></i>已生成';
+                        btn.classList.remove("bg-orange-500", "hover:bg-orange-600");
+                        btn.classList.add("bg-green-500", "hover:bg-green-600");
+                        setTimeout(() => {
+                            btn.innerHTML = originalHtml;
+                            btn.classList.remove("bg-green-500", "hover:bg-green-600");
+                            btn.classList.add("bg-orange-500", "hover:bg-orange-600");
+                        }, 2000);
+                    } else {
+                        const err = await res.json();
+                        alert(err.detail || "重新生成失败");
+                    }
+                } catch (e) {
+                    alert("重新生成失败：" + e.message);
+                }
+            });
+
+            // 新增路由按钮
+            document.getElementById("addRouteBtn").addEventListener("click", () => {
+                showRouteModal(false);
+            });
+
+            // 路由弹窗取消按钮
+            document.getElementById("routeCancelBtn").addEventListener("click", hideRouteModal);
+
+            // 路由弹窗保存按钮
+            document.getElementById("routeSaveBtn").addEventListener("click", async () => {
+                const model = document.getElementById("routeModel").value.trim();
+                const provider_name = document.getElementById("routeProviderName").value.trim();
+                const provider_base_url = document.getElementById("routeProviderBaseUrl").value.trim();
+                const provider_api_key = document.getElementById("routeProviderApiKey").value.trim();
+                const provider_model = document.getElementById("routeProviderModel").value.trim();
+                const provider_api_type = document.getElementById("routeProviderApiType").value;
+
+                if (!model || !provider_name || !provider_base_url || !provider_model) {
+                    alert("请填写所有必填项");
+                    return;
+                }
+
+                // 编辑模式下API Key为空时不更新
+                const body = { model, provider_name, provider_base_url, provider_model, provider_api_type };
+                if (provider_api_key) {
+                    body.provider_api_key = provider_api_key;
+                }
+
+                try {
+                    let res;
+                    if (currentEditingRouteId) {
+                        // 编辑
+                        res = await authFetch(`/v1/user/routes/${currentEditingRouteId}`, {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body)
+                        });
+                    } else {
+                        // 新增
+                        if (!provider_api_key) {
+                            alert("请填写API Key");
+                            return;
+                        }
+                        res = await authFetch("/v1/user/routes", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body)
+                        });
+                    }
+
+                    if (res.ok) {
+                        alert("保存成功");
+                        hideRouteModal();
+                        loadUserRoutes();
+                    } else {
+                        const err = await res.json();
+                        alert(err.detail || "保存失败");
+                    }
+                } catch (e) {
+                    alert("保存失败：" + e.message);
+                }
+            });
+            
+            // 刷新日志按钮
+            document.getElementById("refresh-logs").addEventListener("click", loadLogs);
+            
+            // 日志筛选变化
+            document.getElementById("log-model-filter").addEventListener("change", loadLogs);
+            
+            // 定时检查健康状态
+            setInterval(checkHealth, 30000);
+
+            // ============== 再处理登录逻辑 ==============
+            // 检查是否已登录
+            const token = localStorage.getItem("token");
+            const username = localStorage.getItem("username");
+            if (!token) {
+                showLoginModal();
+                return;
+            }
+
+            // 显示用户名
+            document.getElementById("currentUser").textContent = `欢迎，${username}`;
+
+            // 加载初始数据
+            await loadUserRoutes();
+            await loadProviders();
+            await loadCharts();
+            checkHealth();
+        });
+    </script>
+</body>
+</html>
