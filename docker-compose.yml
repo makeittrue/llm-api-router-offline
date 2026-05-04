@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  llm-api-router:
+    build: .
+    container_name: llm-api-router
+    ports:
+      - "8000:8000"
+    volumes:
+      # 持久化数据库（用户信息、路由配置、调用日志）
+      - ./data/logs.db:/app/logs.db
+      # 挂载配置文件，修改配置不需要重新构建镜像
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      # 时区设置，和服务器本地时间一致
+      - TZ=Asia/Shanghai
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
