@@ -5,5 +5,5 @@ pyyaml
 pydantic
 aiosqlite
 python-jose[cryptography]
-passlib[bcrypt]
+bcrypt>=4.0.0
 python-multipart
