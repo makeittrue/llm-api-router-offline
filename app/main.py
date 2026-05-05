@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -50,6 +50,168 @@ app.add_middleware(
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# 欢迎页
+@app.get("/", include_in_schema=False)
+async def welcome_page():
+    html_content = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM API Router</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            line-height: 1.6;
+            color: #333;
+        }
+        h1 {
+            color: #2563eb;
+            margin-bottom: 20px;
+            font-size: 2.5rem;
+        }
+        .subtitle {
+            font-size: 1.2rem;
+            color: #64748b;
+            margin-bottom: 40px;
+        }
+        .card {
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            border: 1px solid #e2e8f0;
+        }
+        .card h2 {
+            color: #1e293b;
+            margin-bottom: 16px;
+            font-size: 1.4rem;
+        }
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.9rem;
+        }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background: #2563eb;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            margin-right: 16px;
+            margin-top: 8px;
+            transition: background 0.2s;
+        }
+        .btn:hover {
+            background: #1d4ed8;
+        }
+        .btn.secondary {
+            background: #64748b;
+        }
+        .btn.secondary:hover {
+            background: #475569;
+        }
+        ul {
+            margin-left: 24px;
+            margin-bottom: 16px;
+        }
+        li {
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 LLM API Router</h1>
+    <p class="subtitle">多厂商大模型统一接入网关，支持OpenAI兼容接口协议</p>
+
+    <div class="card">
+        <h2>📋 功能特性</h2>
+        <ul>
+            <li>支持OpenAI、Anthropic、百度文心、阿里通义、腾讯混元等所有主流厂商</li>
+            <li>用户私有路由管理，每个用户可以独立配置自己的模型路由</li>
+            <li>完整的调用日志统计和费用计算</li>
+            <li>100%兼容OpenAI接口协议，现有代码无需修改即可切换</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>🔗 快速入口</h2>
+        <a href="/admin" class="btn">管理后台</a>
+        <a href="/docs" class="btn secondary">接口文档</a>
+        <a href="/health" class="btn secondary">健康检查</a>
+    </div>
+
+    <div class="card">
+        <h2>💡 接口调用示例 (OpenAI 兼容)</h2>
+        <p>和OpenAI SDK完全兼容，只需要把base_url改成本服务地址即可：</p>
+        <pre>
+import openai
+
+client = openai.OpenAI(
+    api_key="你的API_KEY",
+    base_url="http://localhost:8000/v1"
+)
+
+# 调用聊天补全
+response = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": "你好"}]
+)
+print(response.choices[0].message.content)
+</pre>
+    </div>
+
+    <div class="card">
+        <h2>📡 cURL 调用示例</h2>
+        <pre>
+curl http://localhost:8000/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer 你的API_KEY" \\
+  -d '{
+    "model": "gpt-3.5-turbo",
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+</pre>
+    </div>
+
+    <div class="card">
+        <h2>✅ 健康检查</h2>
+        <pre>curl http://localhost:8000/health</pre>
+        <p>返回：<code>{"status":"ok"}</code></p>
+    </div>
+
+    <div class="card">
+        <h2>📚 获取模型列表</h2>
+        <pre>
+curl http://localhost:8000/v1/models \\
+  -H "Authorization: Bearer 你的API_KEY"
+</pre>
+    </div>
+
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
+
+# 健康检查接口
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 # OAuth2 方案
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
