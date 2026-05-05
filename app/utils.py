@@ -3,11 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
-
-# 密码哈希上下文
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT配置
 SECRET_KEY = "llm-router-super-secret-key-2024"
@@ -18,13 +15,17 @@ ACCESS_TOKEN_EXPIRE_DAYS = 7
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """验证密码是否正确"""
     # bcrypt算法最多支持72字节，自动截断
-    return pwd_context.verify(plain_password[:72], hashed_password)
+    plain_password_bytes = plain_password.encode('utf-8')[:72]
+    hashed_password_bytes = hashed_password.encode('utf-8')
+    return bcrypt.checkpw(plain_password_bytes, hashed_password_bytes)
 
 
 def get_password_hash(password: str) -> str:
     """生成密码哈希"""
     # bcrypt算法最多支持72字节，自动截断
-    return pwd_context.hash(password[:72])
+    password_bytes = password.encode('utf-8')[:72]
+    # 生成哈希并转成字符串存储
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
 
 
 def create_access_token(data: dict[str, Any]) -> str:

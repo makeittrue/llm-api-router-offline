@@ -277,7 +277,7 @@ async def health():
 async def register(user: UserCreate):
     try:
         # bcrypt算法最多支持72字节，自动截断
-        hashed_password = get_password_hash(user.password[:72])
+        hashed_password = get_password_hash(user.password)
         user_id = call_logger.create_user(user.username, hashed_password)
         return {
             "user_id": user_id,
@@ -292,8 +292,7 @@ async def register(user: UserCreate):
 @app.post("/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = call_logger.get_user_by_username(form_data.username)
-    # bcrypt算法最多支持72字节，自动截断，和注册保持一致
-    if not user or not verify_password(form_data.password[:72], user["password_hash"]):
+    if not user or not verify_password(form_data.password, user["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
