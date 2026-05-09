@@ -7,9 +7,22 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class TextContentPart(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class ImageContentPart(BaseModel):
+    type: Literal["image_url"]
+    image_url: dict[str, str]
+
+
+ContentPart = TextContentPart | ImageContentPart
+
+
 class ChatMessage(BaseModel):
     role: str
-    content: str | None = None
+    content: str | list[ContentPart] | None = None
     name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
