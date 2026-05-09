@@ -72,13 +72,13 @@ class OpenAICompatibleProvider(BaseProvider):
             else:
                 arguments = {}
             
-            # 构建OpenAI标准tool_call格式
+            # 构建Trae兼容的OpenAI标准tool_call格式
             tool_call = {
                 "id": f"call_{tool_name}_{len(tool_calls)}",
                 "type": "function",
                 "function": {
                     "name": tool_name,
-                    "arguments": json.dumps(arguments, ensure_ascii=False)
+                    "arguments": json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
                 }
             }
             tool_calls.append(tool_call)
