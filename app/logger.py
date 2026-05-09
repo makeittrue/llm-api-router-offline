@@ -42,6 +42,10 @@ class CallLogger:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_call_logs_created_at ON call_logs(created_at)
         """)
+        # 日志查询最常用的是按user_id+时间倒序，添加联合索引大幅提升查询速度
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_logs_user_id_created_at ON call_logs(user_id, created_at DESC)
+        """)
         
         # 用户表
         conn.execute("""
