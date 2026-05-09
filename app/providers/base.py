@@ -93,10 +93,60 @@ class OpenAICompatibleProvider(BaseProvider):
     def _build_payload(
         self, request: ChatCompletionRequest, provider_model: str
     ) -> dict[str, Any]:
+        messages = [m.model_dump(exclude_none=True) for m in request.messages]
+        tools = []
+        has_tool_calls = False
+        
+        # 预处理所有消息，提取DSML工具调用，转换成标准tools格式
+        for msg in messages:
+            if msg.get("role") == "user" and msg.get("content"):
+                content = msg["content"]
+                if isinstance(content, str) and "<｜｜DSML｜｜tool_calls>" in content:
+                    # 解析DSML
+                    pure_content, tool_calls = self._parse_dsml_content(content)
+                    msg["content"] = pure_content
+                    
+                    # 转换为标准OpenAI tools格式
+                    for tc in tool_calls:
+                        try:
+                            args = json.loads(tc["function"]["arguments"])
+                            # 提取工具参数结构
+                            properties = {}
+                            required = []
+                            for key in args:
+                                properties[key] = {
+                                    "type": "string",
+                                    "description": f"Parameter {key}"
+                                }
+                                required.append(key)
+                            
+                            tool_def = {
+                                "type": "function",
+                                "function": {
+                                    "name": tc["function"]["name"],
+                                    "description": f"Function {tc['function']['name']}",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": properties,
+                                        "required": required
+                                    }
+                                }
+                            }
+                            tools.append(tool_def)
+                            has_tool_calls = True
+                        except:
+                            continue
+        
         payload: dict[str, Any] = {
             "model": provider_model,
-            "messages": [m.model_dump(exclude_none=True) for m in request.messages],
+            "messages": messages,
         }
+        
+        # 如果有工具调用，添加tools参数
+        if has_tool_calls:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        
         for field in (
             "temperature",
             "top_p",
@@ -108,6 +158,8 @@ class OpenAICompatibleProvider(BaseProvider):
             "frequency_penalty",
             "logit_bias",
             "user",
+            "tools",
+            "tool_choice"
         ):
             val = getattr(request, field, None)
             if val is not None:
@@ -150,59 +202,12 @@ class OpenAICompatibleProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 resp.raise_for_status()
-                dsml_buffer = ""
                 async for line in resp.aiter_lines():
                     if line.startswith("data: "):
                         data_str = line[6:]
                         if data_str.strip() == "[DONE]":
                             yield b"data: [DONE]\n\n"
                             break
-                        
-                        try:
-                            chunk_data = json.loads(data_str)
-                            # 处理流式DSML转换
-                            if chunk_data.get("choices"):
-                                for choice in chunk_data["choices"]:
-                                    delta = choice.get("delta", {})
-                                    if delta.get("content"):
-                                        content = delta["content"]
-                                        dsml_buffer += content
-                                        
-                                        # 检查是否有完整的DSML标签
-                                        if "<｜｜DSML｜｜tool_calls>" in dsml_buffer and "</｜｜DSML｜｜tool_calls>" in dsml_buffer:
-                                            # 解析完整DSML
-                                            pure_content, tool_calls = self._parse_dsml_content(dsml_buffer)
-                                            # 先返回纯文本内容
-                                            if pure_content:
-                                                delta["content"] = pure_content
-                                                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode("utf-8")
-                                            # 再返回tool_calls块
-                                            for tool_call in tool_calls:
-                                                tool_chunk = chunk_data.copy()
-                                                tool_chunk["choices"][0]["delta"] = {
-                                                    "tool_calls": [{
-                                                        "index": 0,
-                                                        "id": tool_call["id"],
-                                                        "type": "function",
-                                                        "function": {
-                                                            "name": tool_call["function"]["name"],
-                                                            "arguments": tool_call["function"]["arguments"]
-                                                        }
-                                                    }]
-                                                }
-                                                yield f"data: {json.dumps(tool_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-                                            dsml_buffer = ""
-                                            continue
-                                        elif "<｜｜DSML｜｜" in dsml_buffer:
-                                            # 正在接收DSML，暂时不返回内容
-                                            delta["content"] = ""
-                                            yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n".encode("utf-8")
-                                            continue
-                        
-                        except:
-                            # 解析失败直接透传
-                            pass
-                        
                         yield f"data: {data_str}\n\n".encode("utf-8")
 
 
