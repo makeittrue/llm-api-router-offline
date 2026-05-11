@@ -354,13 +354,13 @@ async def chat_completions(
     # 替换清理后的消息
     request.messages = cleaned_messages
 
-    # max_tokens 合理限制（适配大模型1M上下文/384K最大输出）
-    # 如果客户端没设置，给一个默认值32768
+    # max_tokens 合理限制（适配大部分模型）
+    # 如果客户端没设置，给一个默认值4096
     if request.max_tokens is None:
-        request.max_tokens = 32768
-    # 限制最大输出为384K，避免超出模型限制
-    elif request.max_tokens > 393216:
-        request.max_tokens = 393216
+        request.max_tokens = 4096
+    # 限制最大输出为8192，避免超出模型限制
+    elif request.max_tokens > 8192:
+        request.max_tokens = 8192
 
     # 优先匹配用户自己的路由
     user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
