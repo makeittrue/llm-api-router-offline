@@ -143,10 +143,8 @@ class OpenAICompatibleProvider(BaseProvider):
             "messages": messages,
         }
         
-        # 如果有工具调用，添加tools参数
-        if has_tool_calls:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        # 工具调用是Trae内部处理的功能，不需要向上游模型发送tools参数
+        # 只需要发送纯文本内容给模型即可，工具调用逻辑由Trae自己完成
         
         for field in (
             "temperature",
