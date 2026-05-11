@@ -295,6 +295,9 @@ async def chat_completions(
     provider_name = None
     provider_model = None
     provider = None
+    
+    # 打印Trae发送的请求参数，排查参数错误问题
+    print(f"[DEBUG] Trae request: {json.dumps(request.model_dump(exclude_unset=True), indent=2, ensure_ascii=False)}")
 
     # 优先匹配用户自己的路由
     user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
