@@ -303,44 +303,41 @@ async def chat_completions(
     # 处理Trae特殊格式：清理content中的系统提醒和历史上下文垃圾内容
     cleaned_messages = []
     for msg in request.messages:
-        if msg.role == "user":
-            # 处理两种content格式：字符串和多模态数组
-            if isinstance(msg.content, str):
-                content = msg.content
-            elif isinstance(msg.content, list):
-                # 合并数组中所有text类型的内容
-                content = ""
-                for item in msg.content:
-                    if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-                        content += item["text"] + "\n"
-            else:
-                # 其他格式直接保留
-                cleaned_messages.append(msg)
-                continue
-            
-            # 执行清理逻辑
-            # 移除<system-reminder>包裹的内容
-            content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL)
-            # 移除Trae特有的工具调用标记
-            content = re.sub(r'<\|｜DSML\|｜.*?>', '', content, flags=re.DOTALL)
-            # 移除<user_input>标签和内容
-            content = re.sub(r'<user_input>.*?</user_input>', '', content, flags=re.DOTALL)
-            # 移除工具调用和返回相关的标签
-            content = re.sub(r'<tool_call_id>.*?</tool_call_id>', '', content, flags=re.DOTALL)
-            content = re.sub(r'<toolcall_status>.*?</toolcall_status>', '', content, flags=re.DOTALL)
-            content = re.sub(r'<toolcall_result>.*?</toolcall_result>', '', content, flags=re.DOTALL)
-            # 移除markdown代码块标记
-            content = re.sub(r'```.*?```', '', content, flags=re.DOTALL)
-            # 移除所有其他的<>包裹的标签内容
-            content = re.sub(r'<[^>]+>', '', content)
-            # 移除多余的空行和空白
-            content = re.sub(r'\n\s*\n', '\n', content).strip()
-            
-            # 如果清理后内容为空，跳过这条消息
-            if content:
-                msg.content = content
-                cleaned_messages.append(msg)
+        # 处理所有角色的消息：system/user/assistant
+        if isinstance(msg.content, str):
+            content = msg.content
+        elif isinstance(msg.content, list):
+            # 合并数组中所有text类型的内容
+            content = ""
+            for item in msg.content:
+                if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                    content += item["text"] + "\n"
         else:
+            # 其他格式直接保留
+            cleaned_messages.append(msg)
+            continue
+        
+        # 执行清理逻辑
+        # 移除<system-reminder>包裹的内容
+        content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL)
+        # 移除Trae特有的工具调用标记
+        content = re.sub(r'<\|｜DSML\|｜.*?>', '', content, flags=re.DOTALL)
+        # 移除<user_input>标签和内容
+        content = re.sub(r'<user_input>.*?</user_input>', '', content, flags=re.DOTALL)
+        # 移除工具调用和返回相关的标签
+        content = re.sub(r'<tool_call_id>.*?</tool_call_id>', '', content, flags=re.DOTALL)
+        content = re.sub(r'<toolcall_status>.*?</toolcall_status>', '', content, flags=re.DOTALL)
+        content = re.sub(r'<toolcall_result>.*?</toolcall_result>', '', content, flags=re.DOTALL)
+        # 移除markdown代码块标记
+        content = re.sub(r'```.*?```', '', content, flags=re.DOTALL)
+        # 移除所有其他的<>包裹的标签内容
+        content = re.sub(r'<[^>]+>', '', content)
+        # 移除多余的空行和空白
+        content = re.sub(r'\n\s*\n', '\n', content).strip()
+        
+        # 如果清理后内容为空，跳过这条消息
+        if content:
+            msg.content = content
             cleaned_messages.append(msg)
     
     # 替换清理后的消息
