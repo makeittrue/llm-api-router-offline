@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Tuple, List, Dict
 
 import httpx
+import tiktoken
 
 from app.config import ProviderConfig
 from app.models import (
@@ -146,6 +147,7 @@ class OpenAICompatibleProvider(BaseProvider):
         # 工具调用是Trae内部处理的功能，不需要向上游模型发送tools参数
         # 只需要发送纯文本内容给模型即可，工具调用逻辑由Trae自己完成
         
+        # DeepSeek不支持tools和tool_choice参数，只发送支持的字段
         for field in (
             "temperature",
             "top_p",
@@ -156,9 +158,7 @@ class OpenAICompatibleProvider(BaseProvider):
             "presence_penalty",
             "frequency_penalty",
             "logit_bias",
-            "user",
-            "tools",
-            "tool_choice"
+            "user"
         ):
             val = getattr(request, field, None)
             if val is not None:
