@@ -494,14 +494,30 @@
         async function loadLogs() {
             try {
                 const model = document.getElementById("log-model-filter").value;
-                const url = `/v1/logs?limit=50${model ? `&model=${encodeURIComponent(model)}` : ""}`;
+                const url = `/v1/logs?limit=10${model ? `&model=${encodeURIComponent(model)}` : ""}`;
                 const res = await authFetch(url);
                 const data = await res.json();
                 const tbody = document.getElementById("logs-table-body");
+                
+                // 显示加载态
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="px-6 py-12 text-center text-gray-500">
+                            <i class="fa fa-circle-o-notch fa-spin text-2xl mb-2"></i>
+                            <p>加载中...</p>
+                        </td>
+                    </tr>
+                `;
+                
+                // 等待100ms让加载动画显示
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+                // 清空加载态，渲染数据
                 tbody.innerHTML = "";
                 
                 data.data.forEach(log => {
                     const tr = document.createElement("tr");
+                    tr.classList.add("cursor-pointer", "hover:bg-gray-50");
                     const time = new Date(log.created_at).toLocaleString('zh-CN');
                     const statusBadge = log.status === "success" 
                         ? `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">成功</span>`
@@ -515,6 +531,33 @@
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${log.duration_ms || 0}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${statusBadge}</td>
                     `;
+                    
+                    // 点击展开详情
+                    tr.addEventListener("click", () => {
+                        // 先关闭其他已展开的详情
+                        document.querySelectorAll(".log-detail-row").forEach(row => row.remove());
+                        
+                        // 创建详情行
+                        const detailRow = document.createElement("tr");
+                        detailRow.classList.add("log-detail-row", "bg-gray-50");
+                        detailRow.innerHTML = `
+                            <td colspan="6" class="px-6 py-4">
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <h4 class="font-bold text-sm mb-2 text-gray-700">请求消息</h4>
+                                        <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${JSON.stringify(log.request_messages, null, 2)}</pre>
+                                    </div>
+                                    <div>
+                                        <h4 class="font-bold text-sm mb-2 text-gray-700">错误信息</h4>
+                                        <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${log.error_message || "-"}</pre>
+                                    </div>
+                                </div>
+                            </td>
+                        `;
+                        
+                        tr.after(detailRow);
+                    });
+                    
                     tbody.appendChild(tr);
                 });
             } catch (e) {
