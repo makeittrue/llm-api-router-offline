@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Depends, HTTPException, status
@@ -298,6 +299,29 @@ async def chat_completions(
     
     # 打印Trae发送的请求参数，排查参数错误问题
     print(f"[DEBUG] Trae request: {json.dumps(request.model_dump(exclude_unset=True), indent=2, ensure_ascii=False)}")
+
+    # 处理Trae特殊格式：清理content中的系统提醒和历史上下文垃圾内容
+    cleaned_messages = []
+    for msg in request.messages:
+        if msg.role == "user" and isinstance(msg.content, str):
+            # 移除所有系统提醒标记和冗余内容
+            content = msg.content
+            # 移除<system-reminder>包裹的内容
+            import re
+            content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL)
+            # 移除Trae特有的工具调用标记和历史上下文
+            content = re.sub(r'<\|｜DSML\|｜.*?>', '', content, flags=re.DOTALL)
+            # 移除多余的空行和空白
+            content = re.sub(r'\n\s*\n', '\n', content).strip()
+            # 如果清理后内容为空，跳过这条消息
+            if content:
+                msg.content = content
+                cleaned_messages.append(msg)
+        else:
+            cleaned_messages.append(msg)
+    
+    # 替换清理后的消息
+    request.messages = cleaned_messages
 
     # 优先匹配用户自己的路由
     user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
