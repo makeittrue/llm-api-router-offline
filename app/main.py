@@ -307,10 +307,19 @@ async def chat_completions(
             # 移除所有系统提醒标记和冗余内容
             content = msg.content
             # 移除<system-reminder>包裹的内容
-            import re
             content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL)
-            # 移除Trae特有的工具调用标记和历史上下文
+            # 移除Trae特有的工具调用标记
             content = re.sub(r'<\|｜DSML\|｜.*?>', '', content, flags=re.DOTALL)
+            # 移除<user_input>标签和内容
+            content = re.sub(r'<user_input>.*?</user_input>', '', content, flags=re.DOTALL)
+            # 移除工具调用和返回相关的标签
+            content = re.sub(r'<tool_call_id>.*?</tool_call_id>', '', content, flags=re.DOTALL)
+            content = re.sub(r'<toolcall_status>.*?</toolcall_status>', '', content, flags=re.DOTALL)
+            content = re.sub(r'<toolcall_result>.*?</toolcall_result>', '', content, flags=re.DOTALL)
+            # 移除markdown代码块标记
+            content = re.sub(r'```.*?```', '', content, flags=re.DOTALL)
+            # 移除所有其他的<>包裹的标签内容
+            content = re.sub(r'<[^>]+>', '', content)
             # 移除多余的空行和空白
             content = re.sub(r'\n\s*\n', '\n', content).strip()
             # 如果清理后内容为空，跳过这条消息
