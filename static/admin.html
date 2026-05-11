@@ -545,7 +545,7 @@
                                 <div class="grid grid-cols-2 gap-4">
                                     <div>
                                         <h4 class="font-bold text-sm mb-2 text-gray-700">请求消息</h4>
-                                        <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${JSON.stringify(log.request_messages, null, 2)}</pre>
+                                        <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${JSON.stringify(typeof log.request_messages === 'string' ? JSON.parse(log.request_messages) : log.request_messages, null, 2)}</pre>
                                     </div>
                                     <div>
                                         <h4 class="font-bold text-sm mb-2 text-gray-700">错误信息</h4>

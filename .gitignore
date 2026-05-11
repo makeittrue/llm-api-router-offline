@@ -165,3 +165,4 @@ Thumbs.db
 logs/
 config.yaml
 *.sqlite3
+test.md
