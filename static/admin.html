@@ -532,8 +532,16 @@
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${statusBadge}</td>
                     `;
                     
-                    // 点击展开详情
+                    // 点击展开/收起详情
                     tr.addEventListener("click", () => {
+                        // 检查当前行是否已经展开
+                        const nextRow = tr.nextElementSibling;
+                        if (nextRow && nextRow.classList.contains("log-detail-row")) {
+                            // 已经展开，点击收起
+                            nextRow.remove();
+                            return;
+                        }
+                        
                         // 先关闭其他已展开的详情
                         document.querySelectorAll(".log-detail-row").forEach(row => row.remove());
                         

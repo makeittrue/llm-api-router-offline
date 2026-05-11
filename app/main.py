@@ -334,14 +334,33 @@ async def chat_completions(
         content = re.sub(r'<[^>]+>', '', content)
         # 移除多余的空行和空白
         content = re.sub(r'\n\s*\n', '\n', content).strip()
+        # 每条消息最大长度限制，避免单条过长
+        if len(content) > 2000:
+            content = content[:2000] + "..."
         
         # 如果清理后内容为空，跳过这条消息
         if content:
             msg.content = content
             cleaned_messages.append(msg)
     
+    # 只保留最近10条消息+第一条system消息，避免总长度超标
+    if len(cleaned_messages) > 10:
+        # 保留system消息（如果第一条是system的话）
+        if cleaned_messages and cleaned_messages[0].role == "system":
+            cleaned_messages = [cleaned_messages[0]] + cleaned_messages[-9:]
+        else:
+            cleaned_messages = cleaned_messages[-10:]
+    
     # 替换清理后的消息
     request.messages = cleaned_messages
+
+    # max_tokens 合理限制（适配大模型1M上下文/384K最大输出）
+    # 如果客户端没设置，给一个默认值32768
+    if request.max_tokens is None:
+        request.max_tokens = 32768
+    # 限制最大输出为384K，避免超出模型限制
+    elif request.max_tokens > 393216:
+        request.max_tokens = 393216
 
     # 优先匹配用户自己的路由
     user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
