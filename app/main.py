@@ -303,9 +303,22 @@ async def chat_completions(
     # 处理Trae特殊格式：清理content中的系统提醒和历史上下文垃圾内容
     cleaned_messages = []
     for msg in request.messages:
-        if msg.role == "user" and isinstance(msg.content, str):
-            # 移除所有系统提醒标记和冗余内容
-            content = msg.content
+        if msg.role == "user":
+            # 处理两种content格式：字符串和多模态数组
+            if isinstance(msg.content, str):
+                content = msg.content
+            elif isinstance(msg.content, list):
+                # 合并数组中所有text类型的内容
+                content = ""
+                for item in msg.content:
+                    if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                        content += item["text"] + "\n"
+            else:
+                # 其他格式直接保留
+                cleaned_messages.append(msg)
+                continue
+            
+            # 执行清理逻辑
             # 移除<system-reminder>包裹的内容
             content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL)
             # 移除Trae特有的工具调用标记
@@ -322,6 +335,7 @@ async def chat_completions(
             content = re.sub(r'<[^>]+>', '', content)
             # 移除多余的空行和空白
             content = re.sub(r'\n\s*\n', '\n', content).strip()
+            
             # 如果清理后内容为空，跳过这条消息
             if content:
                 msg.content = content
