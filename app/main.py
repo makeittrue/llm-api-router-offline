@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from app.utils import verify_password, get_password_hash, create_access_token, verify_token
 
-from app.config import AppConfig, load_config, ProviderConfig
+from app.config import AppConfig, load_config, model_uses_long_context, ProviderConfig
 from app.logger import CallLogger
 from app.models import (
     ChatCompletionRequest,
@@ -300,6 +300,19 @@ async def chat_completions(
     # 打印Trae发送的请求参数，排查参数错误问题
     print(f"[DEBUG] Trae request: {json.dumps(request.model_dump(exclude_unset=True), indent=2, ensure_ascii=False)}")
 
+    ctx = app_config.context
+    use_long_ctx = model_uses_long_context(request.model, ctx)
+    if use_long_ctx:
+        msg_char_cap = ctx.long_context_message_char_cap
+        history_keep = ctx.long_context_history_message_keep
+        max_tok_default = ctx.long_context_max_tokens_default
+        max_tok_cap = ctx.long_context_max_tokens_cap
+    else:
+        msg_char_cap = ctx.message_char_cap
+        history_keep = ctx.history_message_keep
+        max_tok_default = ctx.max_tokens_default
+        max_tok_cap = ctx.max_tokens_cap
+
     # 处理Trae特殊格式：清理content中的系统提醒和历史上下文垃圾内容
     cleaned_messages = []
     for msg in request.messages:
@@ -334,33 +347,31 @@ async def chat_completions(
         content = re.sub(r'<[^>]+>', '', content)
         # 移除多余的空行和空白
         content = re.sub(r'\n\s*\n', '\n', content).strip()
-        # 每条消息最大长度限制，避免单条过长
-        if len(content) > 2000:
-            content = content[:2000] + "..."
+        # 每条消息最大字符数（长上下文模型由 config.context 放宽）
+        if msg_char_cap > 0 and len(content) > msg_char_cap:
+            content = content[:msg_char_cap] + "..."
         
         # 如果清理后内容为空，跳过这条消息
         if content:
             msg.content = content
             cleaned_messages.append(msg)
     
-    # 只保留最近10条消息+第一条system消息，避免总长度超标
-    if len(cleaned_messages) > 10:
-        # 保留system消息（如果第一条是system的话）
+    # 控制历史条数（长上下文模型保留更多；仍保留首条 system）
+    if len(cleaned_messages) > history_keep:
         if cleaned_messages and cleaned_messages[0].role == "system":
-            cleaned_messages = [cleaned_messages[0]] + cleaned_messages[-9:]
+            tail_n = max(history_keep - 1, 1)
+            cleaned_messages = [cleaned_messages[0]] + cleaned_messages[-tail_n:]
         else:
-            cleaned_messages = cleaned_messages[-10:]
+            cleaned_messages = cleaned_messages[-history_keep:]
     
     # 替换清理后的消息
     request.messages = cleaned_messages
 
-    # max_tokens 合理限制（适配大部分模型）
-    # 如果客户端没设置，给一个默认值4096
+    # max_tokens 兜底与上限（长上下文模型单独一套，见 config.context）
     if request.max_tokens is None:
-        request.max_tokens = 4096
-    # 限制最大输出为8192，避免超出模型限制
-    elif request.max_tokens > 8192:
-        request.max_tokens = 8192
+        request.max_tokens = max_tok_default
+    elif request.max_tokens > max_tok_cap:
+        request.max_tokens = max_tok_cap
 
     # 优先匹配用户自己的路由
     user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)

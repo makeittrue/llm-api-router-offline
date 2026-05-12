@@ -107,6 +107,50 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+## Trae IDE 接入（自定义 OpenAI 兼容网关）
+
+Trae 在较新版本支持「自定义模型 / OpenAI 兼容服务商」等能力时，可以把 **Base URL** 指向本项目，从而在 IDE 内使用你在网关里配置的任意上游模型（含私有路由）。不同版本菜单位置可能略有差异，常见入口包括：**头像 → AI 与模型 / 模型管理 → 添加模型**，或聊天区域 **模型选择器 → 添加模型**。
+
+### 1. 在本项目中先完成的准备
+
+1. 按上文启动网关，并打开管理后台 `http://<host>:<port>/admin`。
+2. **注册 / 登录**，复制登录接口返回的 **`access_token`**（即下文中的「网关 Token」）。Trae 里填的 API Key 应与此 Token 一致；请求头等价于 `Authorization: Bearer <Token>`。
+3. 在 **「我的路由」** 添加私有路由，或依赖管理员在 `config.yaml` 中配置的 **全局路由**。Trae 里选用的 **模型名** 必须与网关对外暴露的 **`model` 字段** 完全一致（区分大小写）。
+
+### 2. Trae 侧配置对照
+
+| Trae 中的配置项 | 应填写的内容 |
+|-----------------|--------------|
+| **Base URL** / **OpenAI API 地址** | `http://<网关主机>:<端口>/v1`。**必须包含路径 `/v1`**（与 OpenAI 官方 SDK 习惯一致；本项目的 Chat 与模型列表均在 `/v1` 下）。 |
+| **API Key** | 上一步获得的 **网关 JWT Token**（不是上游 DeepSeek/OpenAI 等厂商的 Key；厂商 Key 只在管理后台「我的路由」里配置）。 |
+| **模型名称** | 与 `GET /v1/models` 返回列表中某个模型的 **`id`** 完全一致。 |
+
+若 Trae 单独要求填写 **Model ID** 与 **显示名称**，显示名称可随意；**Model ID** 仍须与网关中的对外模型名一致。
+
+### 3. 连接与模型列表自检（推荐）
+
+在 Trae 保存配置前，可在终端用同一 Token 验证网关与模型名：
+
+```bash
+curl -sS "http://localhost:8000/v1/models" \
+  -H "Authorization: Bearer 你的网关Token" | head
+```
+
+返回 JSON 中含 `"data": [ { "id": "..." } , ... ]` 即表示鉴权与路由正常；Trae 里选择的模型名须为其中某个 **`id`**。
+
+### 4. 常见问题
+
+- **401 / 鉴权失败**：Trae 中填的 API Key 不是本系统登录后的 Token，或 Token 已过期，请重新登录管理后台或调用 `/login` 获取新 Token。
+- **404 / 模型不存在**：Trae 中的模型名与 `config.yaml` 或「我的路由」里的 **`model` 不一致**，或该用户未配置该模型；用上一节 `curl` 核对 `id` 列表。
+- **Trae 与网关不在同一台机器**：Base URL 中不要用 `localhost`（除非 Trae 进程与网关同机）；应填 **运行 uvicorn 的那台机器的内网 IP 或域名**。
+- **仅 HTTPS 环境**：若 Trae 或公司策略要求 HTTPS，请在网关前加 **Nginx / Caddy** 等反向代理终止 TLS，再把 Trae 的 Base URL 指向 `https://.../v1`。
+- **添加模型时的「连接检测」失败**：Trae 会向 Base URL 发起校验请求；请保证该 URL 在 Trae 所在网络可达，且 **`GET /v1/models` 在携带 Bearer Token 时可返回 200**。
+- **Trae 界面无法修改 Base URL**：部分版本或渠道可能仍限制仅官方端点；可向 Trae 官方反馈需求，或使用支持自定义 Base URL 的扩展能力（以 Trae 插件市场说明为准）。本项目网关侧已提供标准 **`/v1/chat/completions`** 与 **`/v1/models`**，与 OpenAI 兼容客户端协议对齐。
+
+### 5. 与本项目 Trae 相关行为说明
+
+网关对 Trae 发送的 **system**、工具痕迹等先做内容清理（去标签、冗余等），再按 **`config.yaml` 中的 `context` 段**（见下文「上下文与长窗口模型」）对单条消息字符数、历史条数、`max_tokens` 做上限控制。默认情况下，若 Trae 请求的 **`model` 名称**（对外模型名）包含 `deepseek-v4`、`mimo-2.5` 等子串，会自动采用 **约 1M 上下文类** 的宽松上限；其它模型仍使用保守默认值，避免误连小上下文上游时把请求撑爆。若仍出现上游 400 等错误，可在管理后台 **「调用日志」** 中查看 `error_message`，并核对上游 **`provider_model`** 是否在厂商侧有效。
+
 ## 配置说明
 
 ### 全局配置
@@ -135,6 +179,27 @@ routes:
     provider: 对应的服务商名称（和上面provider的name对应）
     provider_model: 服务商侧的实际模型名（可选，和model相同可以省略）
 ```
+
+### 上下文与长窗口模型（可选 `context`）
+
+用于控制网关对 **Trae 等客户端** 的裁剪强度与 `max_tokens` 兜底。若请求里的 **`model` 字段**（对外模型名，与路由里配置的 `model` 一致）匹配 `long_context_model_substrings` 中任一字串（不区分大小写），则使用 `long_context_*` 一组参数（默认可覆盖 **DeepSeek V4、MiMo 2.5** 等约 1M 上下文场景）；否则使用上方的保守默认值。
+
+```yaml
+context:
+  message_char_cap: 2000
+  history_message_keep: 10
+  max_tokens_default: 4096
+  max_tokens_cap: 8192
+  long_context_model_substrings:
+    - "deepseek-v4"
+    - "mimo-2.5"
+  long_context_message_char_cap: 800000
+  long_context_history_message_keep: 256
+  long_context_max_tokens_default: 32768
+  long_context_max_tokens_cap: 393216
+```
+
+`message_char_cap` / `long_context_message_char_cap` 设为 **0** 表示不对单条消息做字符截断（仍会做标签清理）。完整字段说明以 `app/config.py` 中 `ContextConfig` 为准。
 
 ## 用户私有路由说明
 每个用户可以在管理后台独立添加自己的私有路由：

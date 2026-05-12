@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProviderConfig(BaseModel):
@@ -30,9 +30,41 @@ class LogConfig(BaseModel):
     db_path: str = "logs.db"
 
 
+class ContextConfig(BaseModel):
+    """对 Trae 等客户端消息的裁剪与 max_tokens 兜底；命中长上下文名单时用更宽松上限。"""
+
+    # 未命中 long_context 名单时（兼容小上下文模型）
+    message_char_cap: int = Field(default=2000, ge=0)
+    history_message_keep: int = Field(default=10, ge=1)
+    max_tokens_default: int = Field(default=4096, ge=1)
+    max_tokens_cap: int = Field(default=8192, ge=1)
+
+    # 请求 model 名（小写）包含任一子串时，改用下列上限（适配约 1M 上下文类模型，如 DeepSeek V4、MiMo 2.5）
+    long_context_model_substrings: list[str] = Field(
+        default_factory=lambda: [
+            "deepseek-v4",
+            "deepseek_v4",
+            "mimo-2.5",
+            "mimo_2.5",
+            "mimo2.5",
+            "mimo-v2.5",
+        ]
+    )
+    long_context_message_char_cap: int = Field(default=800_000, ge=0)
+    long_context_history_message_keep: int = Field(default=256, ge=1)
+    long_context_max_tokens_default: int = Field(default=32768, ge=1)
+    long_context_max_tokens_cap: int = Field(default=393_216, ge=1)
+
+
+def model_uses_long_context(model: str, ctx: ContextConfig) -> bool:
+    m = model.lower()
+    return any(p.lower() in m for p in ctx.long_context_model_substrings if p)
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     log: LogConfig = LogConfig()
+    context: ContextConfig = ContextConfig()
     providers: list[ProviderConfig] = []
     routes: list[RouteConfig] = []
 
