@@ -78,7 +78,11 @@ class CallLogger:
         """)
         existing = {row[1] for row in conn.execute("PRAGMA table_info(call_logs)").fetchall()}
         if "log_meta" not in existing:
-            conn.execute("ALTER TABLE call_logs ADD COLUMN log_meta TEXT")
+            try:
+                conn.execute("ALTER TABLE call_logs ADD COLUMN log_meta TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         
         # 用户表
         conn.execute("""

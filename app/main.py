@@ -365,6 +365,74 @@ def _apply_trae_conversation_normalization(
     return msgs
 
 
+def _normalize_openai_compatible_messages(
+    messages: list[ChatMessage], ctx: ContextConfig
+) -> list[ChatMessage]:
+    """满足上游 OpenAI 兼容 API 常见校验：首条业务消息不为孤立 assistant、不连续 assistant、
+    每条带 tool_calls 的 assistant 后补足缺失的 tool 回复；并移除 tool_calls 中仅响应里才有的 index 字段。"""
+    out: list[ChatMessage] = []
+    for m in messages:
+        mm = m.model_copy(deep=True)
+        if mm.role == "assistant" and mm.tool_calls:
+            new_tcs: list[dict] = []
+            for tc in mm.tool_calls:
+                if isinstance(tc, dict):
+                    tc = {k: v for k, v in tc.items() if k != "index"}
+                new_tcs.append(tc)
+            mm.tool_calls = new_tcs
+        out.append(mm)
+
+    k = 0
+    while k < len(out) and out[k].role == "system":
+        k += 1
+    if k < len(out) and out[k].role == "assistant":
+        out.insert(
+            k,
+            ChatMessage(role="user", content=ctx.trae_synthetic_user_content),
+        )
+
+    bridge = "Continue from the prior assistant message in this session."
+    i = 0
+    while i < len(out) - 1:
+        if out[i].role == "assistant" and out[i + 1].role == "assistant":
+            out.insert(i + 1, ChatMessage(role="user", content=bridge))
+            i += 2
+        else:
+            i += 1
+
+    i = 0
+    while i < len(out):
+        m = out[i]
+        if m.role != "assistant" or not m.tool_calls:
+            i += 1
+            continue
+        expected_ids: list[str] = []
+        for tc in m.tool_calls:
+            if isinstance(tc, dict) and tc.get("id"):
+                expected_ids.append(str(tc["id"]))
+        if not expected_ids:
+            i += 1
+            continue
+        got = {eid: False for eid in expected_ids}
+        j = i + 1
+        while j < len(out) and out[j].role == "tool":
+            tid = out[j].tool_call_id
+            if tid and tid in got:
+                got[tid] = True
+            j += 1
+        missing = [eid for eid in expected_ids if not got[eid]]
+        insert_pos = j
+        for mid in missing:
+            out.insert(
+                insert_pos,
+                ChatMessage(role="tool", tool_call_id=mid, content=""),
+            )
+            insert_pos += 1
+        i = insert_pos
+
+    return out
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -431,9 +499,15 @@ async def chat_completions(
             content, msg.role, use_long_ctx=use_long_ctx, msg_char_cap=msg_char_cap
         )
 
-        # 如果清理后内容为空，跳过这条消息
-        if content:
-            msg.content = content
+        # 清理后文本为空仍须保留：tool 轮次、assistant 带 tool_calls（否则会破坏 tool_calls ↔ tool 配对）
+        keep = bool(content) or msg.role == "tool" or bool(msg.tool_calls)
+        if keep:
+            if msg.role == "assistant" and msg.tool_calls and not content:
+                msg.content = None
+            elif msg.role == "tool" and not content:
+                msg.content = ""
+            else:
+                msg.content = content
             cleaned_messages.append(msg)
 
     # 控制历史条数（长上下文模型保留更多；仍保留首条 system）
@@ -445,6 +519,7 @@ async def chat_completions(
             cleaned_messages = cleaned_messages[-history_keep:]
 
     cleaned_messages = _apply_trae_conversation_normalization(cleaned_messages, ctx)
+    cleaned_messages = _normalize_openai_compatible_messages(cleaned_messages, ctx)
 
     # 替换清理后的消息
     request.messages = cleaned_messages
