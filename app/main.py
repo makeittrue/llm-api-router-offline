@@ -23,6 +23,7 @@ from app.models import (
     ModelListResponse,
 )
 from app.providers.base import create_provider, parse_dsml_content
+from app.router import Router
 
 app_config: AppConfig | None = None
 router: Router | None = None
