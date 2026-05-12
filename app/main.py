@@ -14,15 +14,15 @@ from pydantic import BaseModel
 
 from app.utils import verify_password, get_password_hash, create_access_token, verify_token
 
-from app.config import AppConfig, load_config, ProviderConfig, route_targets_long_context
+from app.config import AppConfig, ContextConfig, load_config, ProviderConfig, route_targets_long_context
 from app.logger import CallLogger, build_request_log_meta
 from app.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatMessage,
     ModelListResponse,
 )
-from app.router import Router
-from app.providers.base import create_provider
+from app.providers.base import create_provider, parse_dsml_content
 
 app_config: AppConfig | None = None
 router: Router | None = None
@@ -313,6 +313,57 @@ def _clean_trae_message_text(
     return content
 
 
+def _strip_dsml_from_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
+    out: list[ChatMessage] = []
+    for msg in messages:
+        m = msg.model_copy(deep=True)
+        if isinstance(m.content, str) and m.content:
+            pure, tcs = parse_dsml_content(m.content)
+            if tcs:
+                stripped = pure.strip()
+                m.content = stripped if stripped else None
+        has_tc = bool(m.tool_calls)
+        has_body = m.content is not None and (
+            (isinstance(m.content, str) and m.content != "")
+            or (isinstance(m.content, list) and len(m.content) > 0)
+        )
+        if not has_body and not has_tc:
+            continue
+        out.append(m)
+    return out
+
+
+def _merge_consecutive_assistant_text(messages: list[ChatMessage]) -> list[ChatMessage]:
+    out: list[ChatMessage] = []
+    for msg in messages:
+        if (
+            msg.role == "assistant"
+            and isinstance(msg.content, str)
+            and not msg.tool_calls
+            and out
+            and out[-1].role == "assistant"
+            and isinstance(out[-1].content, str)
+            and not out[-1].tool_calls
+        ):
+            prev = out[-1]
+            prev.content = (prev.content or "").rstrip() + "\n\n" + (msg.content or "").lstrip()
+        else:
+            out.append(msg.model_copy(deep=True))
+    return out
+
+
+def _apply_trae_conversation_normalization(
+    messages: list[ChatMessage], ctx: ContextConfig
+) -> list[ChatMessage]:
+    msgs = _strip_dsml_from_messages(messages)
+    if ctx.trae_merge_consecutive_assistant:
+        msgs = _merge_consecutive_assistant_text(msgs)
+    if ctx.trae_synthetic_user_when_missing and not any(m.role == "user" for m in msgs):
+        msgs = list(msgs)
+        msgs.append(ChatMessage(role="user", content=ctx.trae_synthetic_user_content))
+    return msgs
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -391,6 +442,8 @@ async def chat_completions(
             cleaned_messages = [cleaned_messages[0]] + cleaned_messages[-tail_n:]
         else:
             cleaned_messages = cleaned_messages[-history_keep:]
+
+    cleaned_messages = _apply_trae_conversation_normalization(cleaned_messages, ctx)
 
     # 替换清理后的消息
     request.messages = cleaned_messages

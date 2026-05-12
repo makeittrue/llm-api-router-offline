@@ -41,6 +41,11 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     user: str | None = None
+    tools: list[Any] | None = None
+    tool_choice: Any | None = None
+    parallel_tool_calls: bool | None = None
+    stream_options: dict[str, Any] | None = None
+    response_format: dict[str, Any] | None = None
 
 
 class CompletionUsage(BaseModel):

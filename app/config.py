@@ -56,6 +56,13 @@ class ContextConfig(BaseModel):
     long_context_max_tokens_default: int = Field(default=32768, ge=1)
     long_context_max_tokens_cap: int = Field(default=393_216, ge=1)
 
+    trae_merge_consecutive_assistant: bool = True
+    trae_synthetic_user_when_missing: bool = True
+    trae_synthetic_user_content: str = (
+        "Continue from the IDE conversation context above. "
+        "Follow the system instructions; reply helpfully or ask a brief clarifying question if the task is unclear."
+    )
+
 
 def model_uses_long_context(model: str, ctx: ContextConfig) -> bool:
     m = model.lower()

@@ -16,6 +16,44 @@ from app.models import (
 )
 
 
+def parse_dsml_content(content: str) -> Tuple[str, List[Dict[str, Any]]]:
+    if not content:
+        return content, []
+    if not re.search(r"<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*tool_calls\s*>", content, re.IGNORECASE):
+        return content, []
+    dsml_pattern = r"<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*tool_calls\s*>(.*?)<\s*\/\s*｜\s*｜\s*DSML\s*｜\s*｜\s*tool_calls\s*>"
+    match = re.search(dsml_pattern, content, re.DOTALL | re.IGNORECASE)
+    if not match:
+        return content, []
+    dsml_content = match.group(1)
+    pure_content = re.sub(dsml_pattern, "", content, flags=re.DOTALL).strip()
+    tool_calls: List[Dict[str, Any]] = []
+    invoke_pattern = r'<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*invoke\s+name\s*=\s*"([^"]+)"\s*>(.*?)<\s*\/\s*｜\s*｜\s*DSML\s*｜\s*｜\s*invoke\s*>'
+    for invoke_match in re.finditer(invoke_pattern, dsml_content, re.DOTALL | re.IGNORECASE):
+        tool_name = invoke_match.group(1).strip()
+        invoke_content = invoke_match.group(2)
+        param_pattern = r'<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*parameter\s+name\s*=\s*"([^"]+)"\s*(?:\s+string\s*=\s*"[^"]*")?\s*>(.*?)<\s*\/\s*｜\s*｜\s*DSML\s*｜\s*｜\s*parameter\s*>'
+        param_match = re.search(param_pattern, invoke_content, re.DOTALL | re.IGNORECASE)
+        if param_match:
+            param_value = param_match.group(2).strip()
+            try:
+                arguments = json.loads(param_value)
+            except Exception:
+                arguments = {"content": param_value}
+        else:
+            arguments = {}
+        tool_call = {
+            "id": f"call_{tool_name}_{len(tool_calls)}",
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+            },
+        }
+        tool_calls.append(tool_call)
+    return pure_content, tool_calls
+
+
 class BaseProvider(ABC):
     def __init__(self, config: ProviderConfig):
         self.config = config
@@ -37,54 +75,7 @@ class OpenAICompatibleProvider(BaseProvider):
         return f"{base}{path}"
     
     def _parse_dsml_content(self, content: str) -> Tuple[str, List[Dict[str, Any]]]:
-        """解析Trae DSML格式，转换为标准OpenAI tool_calls格式"""
-        # 兼容可能的转义和空白字符情况
-        if not re.search(r"<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*tool_calls\s*>", content, re.IGNORECASE):
-            return content, []
-        
-        # 提取DSML工具调用部分，兼容各种空白和转义
-        dsml_pattern = r"<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*tool_calls\s*>(.*?)<\s*\/\s*｜\s*｜\s*DSML\s*｜\s*｜\s*tool_calls\s*>"
-        match = re.search(dsml_pattern, content, re.DOTALL | re.IGNORECASE)
-        if not match:
-            return content, []
-        
-        dsml_content = match.group(1)
-        # 移除DSML部分，剩余内容作为普通文本
-        pure_content = re.sub(dsml_pattern, "", content, flags=re.DOTALL).strip()
-        
-        tool_calls = []
-        # 解析每个invoke调用，兼容空白和转义
-        invoke_pattern = r'<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*invoke\s+name\s*=\s*"([^"]+)"\s*>(.*?)<\s*\/\s*｜\s*｜\s*DSML\s*｜\s*｜\s*invoke\s*>'
-        for invoke_match in re.finditer(invoke_pattern, dsml_content, re.DOTALL | re.IGNORECASE):
-            tool_name = invoke_match.group(1).strip()
-            invoke_content = invoke_match.group(2)
-            
-            # 解析参数，兼容空白和转义
-            param_pattern = r'<\s*｜\s*｜\s*DSML\s*｜\s*｜\s*parameter\s+name\s*=\s*"([^"]+)"\s*(?:\s+string\s*=\s*"[^"]*")?\s*>(.*?)<\s*\/\s*｜\s*｜\s*DSML\s*｜\s*｜\s*parameter\s*>'
-            param_match = re.search(param_pattern, invoke_content, re.DOTALL | re.IGNORECASE)
-            if param_match:
-                param_name = param_match.group(1)
-                param_value = param_match.group(2).strip()
-                # 尝试解析JSON参数
-                try:
-                    arguments = json.loads(param_value)
-                except:
-                    arguments = {"content": param_value}
-            else:
-                arguments = {}
-            
-            # 构建Trae兼容的OpenAI标准tool_call格式
-            tool_call = {
-                "id": f"call_{tool_name}_{len(tool_calls)}",
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "arguments": json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-                }
-            }
-            tool_calls.append(tool_call)
-        
-        return pure_content, tool_calls
+        return parse_dsml_content(content)
 
     def _build_headers(self) -> dict[str, str]:
         return {
@@ -96,58 +87,10 @@ class OpenAICompatibleProvider(BaseProvider):
         self, request: ChatCompletionRequest, provider_model: str
     ) -> dict[str, Any]:
         messages = [m.model_dump(exclude_none=True) for m in request.messages]
-        tools = []
-        has_tool_calls = False
-        
-        # 预处理所有消息，提取DSML工具调用，转换成标准tools格式
-        for msg in messages:
-            if msg.get("role") == "user" and msg.get("content"):
-                content = msg["content"]
-                if isinstance(content, str) and "<｜｜DSML｜｜tool_calls>" in content:
-                    # 解析DSML
-                    pure_content, tool_calls = self._parse_dsml_content(content)
-                    msg["content"] = pure_content
-                    
-                    # 转换为标准OpenAI tools格式
-                    for tc in tool_calls:
-                        try:
-                            args = json.loads(tc["function"]["arguments"])
-                            # 提取工具参数结构
-                            properties = {}
-                            required = []
-                            for key in args:
-                                properties[key] = {
-                                    "type": "string",
-                                    "description": f"Parameter {key}"
-                                }
-                                required.append(key)
-                            
-                            tool_def = {
-                                "type": "function",
-                                "function": {
-                                    "name": tc["function"]["name"],
-                                    "description": f"Function {tc['function']['name']}",
-                                    "parameters": {
-                                        "type": "object",
-                                        "properties": properties,
-                                        "required": required
-                                    }
-                                }
-                            }
-                            tools.append(tool_def)
-                            has_tool_calls = True
-                        except:
-                            continue
-        
         payload: dict[str, Any] = {
             "model": provider_model,
             "messages": messages,
         }
-        
-        # 工具调用是Trae内部处理的功能，不需要向上游模型发送tools参数
-        # 只需要发送纯文本内容给模型即可，工具调用逻辑由Trae自己完成
-        
-        # DeepSeek不支持tools和tool_choice参数，只发送支持的字段
         for field in (
             "temperature",
             "top_p",
@@ -158,7 +101,12 @@ class OpenAICompatibleProvider(BaseProvider):
             "presence_penalty",
             "frequency_penalty",
             "logit_bias",
-            "user"
+            "user",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "stream_options",
+            "response_format",
         ):
             val = getattr(request, field, None)
             if val is not None:
@@ -197,7 +145,7 @@ class OpenAICompatibleProvider(BaseProvider):
             for choice in data["choices"]:
                 if choice.get("message", {}).get("content"):
                     content = choice["message"]["content"]
-                    pure_content, tool_calls = self._parse_dsml_content(content)
+                    pure_content, tool_calls = parse_dsml_content(content)
                     if tool_calls:
                         choice["message"]["content"] = pure_content
                         choice["message"]["tool_calls"] = tool_calls
