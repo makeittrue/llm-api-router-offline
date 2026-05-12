@@ -9,6 +9,24 @@ from typing import Any
 from app.models import ChatCompletionRequest, ChatCompletionResponse
 
 
+def _usage_tokens_triple(u: Any) -> tuple[int, int, int]:
+    if u is None:
+        return 0, 0, 0
+    if isinstance(u, dict):
+        return (
+            int(u.get("prompt_tokens") or 0),
+            int(u.get("completion_tokens") or 0),
+            int(u.get("total_tokens") or 0),
+        )
+    pt = getattr(u, "prompt_tokens", None)
+    ct = getattr(u, "completion_tokens", None)
+    tt = getattr(u, "total_tokens", None)
+    try:
+        return int(pt or 0), int(ct or 0), int(tt or 0)
+    except (TypeError, ValueError):
+        return 0, 0, 0
+
+
 def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
     roles: list[str] = []
     message_chars: list[dict[str, Any]] = []
@@ -288,6 +306,7 @@ class CallLogger:
         self,
         request: ChatCompletionRequest,
         response: ChatCompletionResponse | None = None,
+        response_body: dict[str, Any] | None = None,
         provider_name: str | None = None,
         provider_model: str | None = None,
         duration_ms: int = 0,
@@ -299,21 +318,28 @@ class CallLogger:
     ):
         conn = sqlite3.connect(self.db_path)
         try:
-            usage = response.usage if response else None
-            request_id = response.id if response else None
             is_stream = 1 if request.stream else 0
 
             if stream_usage:
                 pt = int(stream_usage.get("prompt_tokens") or 0)
                 ct = int(stream_usage.get("completion_tokens") or 0)
                 tt = int(stream_usage.get("total_tokens") or 0)
-            elif usage:
-                pt, ct, tt = usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+            elif response_body is not None:
+                pt, ct, tt = _usage_tokens_triple(response_body.get("usage"))
+            elif response is not None:
+                pt, ct, tt = _usage_tokens_triple(response.usage)
             else:
                 pt = ct = tt = 0
 
+            request_id = None
+            if response_body is not None:
+                rid = response_body.get("id")
+                request_id = str(rid) if rid is not None else None
+            elif response is not None:
+                request_id = response.id
+
             messages_json = json.dumps(
-                [m.model_dump(exclude_none=True) for m in request.messages],
+                [m.model_dump(mode="python", exclude_none=True) for m in request.messages],
                 ensure_ascii=False,
             )
             log_meta_json = json.dumps(log_meta, ensure_ascii=False) if log_meta else None

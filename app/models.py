@@ -4,48 +4,46 @@ import time
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
-
-
-class TextContentPart(BaseModel):
-    type: Literal["text"]
-    text: str
-
-
-class ImageContentPart(BaseModel):
-    type: Literal["image_url"]
-    image_url: dict[str, str]
-
-
-ContentPart = TextContentPart | ImageContentPart
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatMessage(BaseModel):
+    """与 OpenAI Chat Completions 单条消息对齐；未知字段与扩展结构原样进出。"""
+
+    model_config = ConfigDict(extra="allow")
+
     role: str
-    content: str | list[ContentPart] | None = None
+    content: Any | None = None
     name: str | None = None
-    tool_calls: list[dict[str, Any]] | None = None
+    tool_calls: Any | None = None
     tool_call_id: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
+    """OpenAI `/v1/chat/completions` 请求体：`extra` 放行官方新增或厂商扩展字段。"""
+
+    model_config = ConfigDict(extra="allow")
+
     model: str
     messages: list[ChatMessage]
     temperature: float | None = None
     top_p: float | None = None
     n: int | None = None
     stream: bool | None = False
-    stop: str | list[str] | None = None
+    stream_options: dict[str, Any] | None = None
+    stop: Any | None = None
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     user: str | None = None
-    tools: list[Any] | None = None
+    seed: int | None = None
+    tools: Any | None = None
     tool_choice: Any | None = None
     parallel_tool_calls: bool | None = None
-    stream_options: dict[str, Any] | None = None
-    response_format: dict[str, Any] | None = None
+    response_format: Any | None = None
+    modalities: Any | None = None
 
 
 class CompletionUsage(BaseModel):
@@ -72,12 +70,16 @@ class ChatChoice(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
+    """网关内部或测试用快照；对外开放接口改为透传上游 `dict`/JSON。"""
+
+    model_config = ConfigDict(extra="allow")
+
     id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex[:12]}")
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str = ""
     choices: list[ChatChoice] = []
-    usage: CompletionUsage = CompletionUsage()
+    usage: CompletionUsage | dict[str, Any] | None = None
 
 
 class ChatCompletionChunk(BaseModel):

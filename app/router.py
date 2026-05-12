@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from app.config import AppConfig, ProviderConfig, build_route_map
 from app.models import (
     ChatCompletionRequest,
-    ChatCompletionResponse,
     ModelInfo,
 )
 from app.providers.base import BaseProvider, create_provider
@@ -41,11 +40,11 @@ class Router:
 
     async def dispatch(
         self, request: ChatCompletionRequest
-    ) -> ChatCompletionResponse:
+    ) -> dict[str, Any]:
         provider, provider_model = self.resolve(request.model)
-        response = await provider.chat_completion(request, provider_model)
-        response.model = request.model
-        return response
+        data = await provider.chat_completion(request, provider_model)
+        data["model"] = request.model
+        return data
 
     async def dispatch_stream(
         self, request: ChatCompletionRequest

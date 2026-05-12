@@ -78,9 +78,9 @@ class ContextConfig(BaseModel):
     trae_merge_consecutive_assistant: bool = True
     trae_synthetic_user_when_missing: bool = True
     trae_synthetic_user_content: str = (
-        "Continue from the IDE conversation context above. "
-        "Follow the system instructions; reply helpfully or ask a brief clarifying question if the task is unclear."
+        "请基于上方 IDE 对话上下文继续。遵循系统说明；若任务不清晰可简要追问。"
     )
+    trae_bridge_between_consecutive_assistant: str = "请接续本会话中上一条助手回复继续。"
 
     # 对 assistant.tool_calls 里 function.arguments 的 JSON 做字符串值前缀替换（请求入站与非流式响应出站）
     path_prefix_rewrites: list[PathPrefixRewrite] = Field(default_factory=list)

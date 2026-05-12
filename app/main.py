@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 import time
-import re
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,16 +14,10 @@ from pydantic import BaseModel
 
 from app.utils import verify_password, get_password_hash, create_access_token, verify_token
 
-from app.config import AppConfig, ContextConfig, load_config, ProviderConfig, route_targets_long_context
+from app.config import AppConfig, load_config, ProviderConfig
 from app.logger import CallLogger, build_request_log_meta
-from app.models import (
-    ChatChoice,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatMessage,
-    ModelListResponse,
-)
-from app.providers.base import create_provider, parse_dsml_content
+from app.models import ChatCompletionRequest, ModelListResponse
+from app.providers.base import UpstreamError, create_provider
 from app.router import Router
 
 app_config: AppConfig | None = None
@@ -290,231 +283,19 @@ async def list_models(current_user: dict = Depends(get_current_user)):
     return ModelListResponse(data=unique_models)
 
 
-def _clean_trae_message_text(
-    content: str, role: str, *, use_long_ctx: bool, msg_char_cap: int
-) -> str:
-    """Trae 消息清理。长上下文 + system 仅去掉明确噪声标签，避免 ``` / <tag> 规则误伤整段系统提示词。"""
-    if use_long_ctx and role == "system":
-        content = re.sub(r"<system-reminder>.*?</system-reminder>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<\|｜DSML\|｜.*?>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<user_input>.*?</user_input>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<tool_call_id>.*?</tool_call_id>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<toolcall_status>.*?</toolcall_status>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<toolcall_result>.*?</toolcall_result>", "", content, flags=re.DOTALL)
-    else:
-        content = re.sub(r"<system-reminder>.*?</system-reminder>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<\|｜DSML\|｜.*?>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<user_input>.*?</user_input>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<tool_call_id>.*?</tool_call_id>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<toolcall_status>.*?</toolcall_status>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<toolcall_result>.*?</toolcall_result>", "", content, flags=re.DOTALL)
-        content = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
-        content = re.sub(r"<[^>]+>", "", content)
-    content = re.sub(r"\n\s*\n", "\n", content).strip()
-    if msg_char_cap > 0 and len(content) > msg_char_cap:
-        content = content[:msg_char_cap] + "..."
-    return content
-
-
-def _strip_dsml_from_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
-    out: list[ChatMessage] = []
-    for msg in messages:
-        m = msg.model_copy(deep=True)
-        if isinstance(m.content, str) and m.content:
-            pure, tcs = parse_dsml_content(m.content)
-            if tcs:
-                stripped = pure.strip()
-                m.content = stripped if stripped else None
-        has_tc = bool(m.tool_calls)
-        has_body = m.content is not None and (
-            (isinstance(m.content, str) and m.content != "")
-            or (isinstance(m.content, list) and len(m.content) > 0)
-        )
-        if not has_body and not has_tc:
-            continue
-        out.append(m)
-    return out
-
-
-def _merge_consecutive_assistant_text(messages: list[ChatMessage]) -> list[ChatMessage]:
-    out: list[ChatMessage] = []
-    for msg in messages:
-        if (
-            msg.role == "assistant"
-            and isinstance(msg.content, str)
-            and not msg.tool_calls
-            and out
-            and out[-1].role == "assistant"
-            and isinstance(out[-1].content, str)
-            and not out[-1].tool_calls
-        ):
-            prev = out[-1]
-            prev.content = (prev.content or "").rstrip() + "\n\n" + (msg.content or "").lstrip()
-        else:
-            out.append(msg.model_copy(deep=True))
-    return out
-
-
-def _apply_trae_conversation_normalization(
-    messages: list[ChatMessage], ctx: ContextConfig
-) -> list[ChatMessage]:
-    msgs = _strip_dsml_from_messages(messages)
-    if ctx.trae_merge_consecutive_assistant:
-        msgs = _merge_consecutive_assistant_text(msgs)
-    if ctx.trae_synthetic_user_when_missing and not any(m.role == "user" for m in msgs):
-        msgs = list(msgs)
-        msgs.append(ChatMessage(role="user", content=ctx.trae_synthetic_user_content))
-    return msgs
-
-
-def _normalize_openai_compatible_messages(
-    messages: list[ChatMessage], ctx: ContextConfig
-) -> list[ChatMessage]:
-    """满足上游 OpenAI 兼容 API 常见校验：首条业务消息不为孤立 assistant、不连续 assistant、
-    每条带 tool_calls 的 assistant 后补足缺失的 tool 回复；并移除 tool_calls 中仅响应里才有的 index 字段。"""
-    out: list[ChatMessage] = []
-    for m in messages:
-        mm = m.model_copy(deep=True)
-        if mm.role == "assistant" and mm.tool_calls:
-            new_tcs: list[dict] = []
-            for tc in mm.tool_calls:
-                if isinstance(tc, dict):
-                    tc = {k: v for k, v in tc.items() if k != "index"}
-                new_tcs.append(tc)
-            mm.tool_calls = new_tcs
-        out.append(mm)
-
-    k = 0
-    while k < len(out) and out[k].role == "system":
-        k += 1
-    if k < len(out) and out[k].role == "assistant":
-        out.insert(
-            k,
-            ChatMessage(role="user", content=ctx.trae_synthetic_user_content),
-        )
-
-    bridge = "Continue from the prior assistant message in this session."
-    i = 0
-    while i < len(out) - 1:
-        if out[i].role == "assistant" and out[i + 1].role == "assistant":
-            out.insert(i + 1, ChatMessage(role="user", content=bridge))
-            i += 2
-        else:
-            i += 1
-
-    i = 0
-    while i < len(out):
-        m = out[i]
-        if m.role != "assistant" or not m.tool_calls:
-            i += 1
-            continue
-        expected_ids: list[str] = []
-        for tc in m.tool_calls:
-            if isinstance(tc, dict) and tc.get("id"):
-                expected_ids.append(str(tc["id"]))
-        if not expected_ids:
-            i += 1
-            continue
-        got = {eid: False for eid in expected_ids}
-        j = i + 1
-        while j < len(out) and out[j].role == "tool":
-            tid = out[j].tool_call_id
-            if tid and tid in got:
-                got[tid] = True
-            j += 1
-        missing = [eid for eid in expected_ids if not got[eid]]
-        insert_pos = j
-        for mid in missing:
-            out.insert(
-                insert_pos,
-                ChatMessage(role="tool", tool_call_id=mid, content=""),
-            )
-            insert_pos += 1
-        i = insert_pos
-
-    return out
-
-
-def _path_rewrite_ordered_pairs(ctx: ContextConfig) -> list[tuple[str, str]]:
-    rules = [(r.from_path, r.to_path) for r in ctx.path_prefix_rewrites if r.from_path]
-    return sorted(rules, key=lambda x: len(x[0]), reverse=True)
-
-
-def _rewrite_string_by_prefixes(s: str, pairs: list[tuple[str, str]]) -> str:
-    for old, new in pairs:
-        if s.startswith(old):
-            return new + s[len(old) :]
-    return s
-
-
-def _rewrite_path_strings_in_obj(obj: Any, pairs: list[tuple[str, str]]) -> Any:
-    if isinstance(obj, str):
-        return _rewrite_string_by_prefixes(obj, pairs)
-    if isinstance(obj, dict):
-        return {k: _rewrite_path_strings_in_obj(v, pairs) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_rewrite_path_strings_in_obj(v, pairs) for v in obj]
-    return obj
-
-
-def _rewrite_tool_calls_arguments(
-    tool_calls: list[dict[str, Any]] | None, pairs: list[tuple[str, str]]
-) -> list[dict[str, Any]] | None:
-    if not tool_calls or not pairs:
-        return tool_calls
-    out: list[dict[str, Any]] = []
-    for tc in tool_calls:
-        if not isinstance(tc, dict):
-            out.append(tc)
-            continue
-        tc2 = dict(tc)
-        fn = tc2.get("function")
-        if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
-            fn2 = dict(fn)
-            try:
-                args = json.loads(fn2["arguments"])
-                fn2["arguments"] = json.dumps(
-                    _rewrite_path_strings_in_obj(args, pairs),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                tc2["function"] = fn2
-            except json.JSONDecodeError:
-                pass
-        out.append(tc2)
-    return out
-
-
-def _apply_path_prefix_rewrites_to_messages(
-    messages: list[ChatMessage], ctx: ContextConfig
-) -> list[ChatMessage]:
-    pairs = _path_rewrite_ordered_pairs(ctx)
-    if not pairs:
-        return messages
-    out: list[ChatMessage] = []
-    for m in messages:
-        mm = m.model_copy(deep=True)
-        if mm.role == "assistant" and mm.tool_calls:
-            mm.tool_calls = _rewrite_tool_calls_arguments(mm.tool_calls, pairs)
-        out.append(mm)
-    return out
-
-
-def _apply_path_prefix_rewrites_to_chat_response(
-    response: ChatCompletionResponse, ctx: ContextConfig
-) -> ChatCompletionResponse:
-    pairs = _path_rewrite_ordered_pairs(ctx)
-    if not pairs or not response.choices:
-        return response
-    new_choices: list[ChatChoice] = []
-    for ch in response.choices:
-        if ch.message and ch.message.tool_calls:
-            msg = ch.message.model_copy(deep=True)
-            msg.tool_calls = _rewrite_tool_calls_arguments(msg.tool_calls, pairs)
-            new_choices.append(ch.model_copy(update={"message": msg}))
-        else:
-            new_choices.append(ch)
-    return response.model_copy(update={"choices": new_choices})
+def _preview_from_completion_body(data: dict[str, Any]) -> tuple[str | None, str | None]:
+    choices = data.get("choices") or []
+    if not choices:
+        return None, None
+    ch0 = choices[0]
+    fr = ch0.get("finish_reason")
+    msg = ch0.get("message") or {}
+    mc = msg.get("content")
+    if isinstance(mc, str):
+        return fr, mc
+    if mc is not None:
+        return fr, json.dumps(mc, ensure_ascii=False)
+    return fr, None
 
 
 @app.post("/v1/chat/completions")
@@ -526,11 +307,12 @@ async def chat_completions(
     provider_name = None
     provider_model = None
     provider = None
-    
-    # 打印Trae发送的请求参数，排查参数错误问题
-    print(f"[DEBUG] Trae request: {json.dumps(request.model_dump(exclude_unset=True), indent=2, ensure_ascii=False)}")
 
-    # 先解析路由，便于用「对外 model + 上游 provider_model」判断是否长上下文（Trae 里自定义名可能不含 v4 字样）
+    print(
+        "[DEBUG] chat/completions request:",
+        json.dumps(request.model_dump(mode="python", exclude_none=True), indent=2, ensure_ascii=False),
+    )
+
     user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
     if user_route:
         provider_config = ProviderConfig(
@@ -547,77 +329,76 @@ async def chat_completions(
             provider, provider_model = router.resolve(request.model)
             provider_name = provider.config.name
         except ValueError as e:
-            return JSONResponse(status_code=404, content={"error": {"message": str(e)}})
-
-    ctx = app_config.context
-    use_long_ctx = route_targets_long_context(request.model, provider_model, ctx)
-    if use_long_ctx:
-        msg_char_cap = ctx.long_context_message_char_cap
-        history_keep = ctx.long_context_history_message_keep
-        max_tok_default = ctx.long_context_max_tokens_default
-        max_tok_cap = ctx.long_context_max_tokens_cap
-    else:
-        msg_char_cap = ctx.message_char_cap
-        history_keep = ctx.history_message_keep
-        max_tok_default = ctx.max_tokens_default
-        max_tok_cap = ctx.max_tokens_cap
-
-    # 处理Trae特殊格式：清理content中的系统提醒和历史上下文垃圾内容
-    cleaned_messages = []
-    for msg in request.messages:
-        # 处理所有角色的消息：system/user/assistant
-        if isinstance(msg.content, str):
-            content = msg.content
-        elif isinstance(msg.content, list):
-            # 合并数组中所有text类型的内容
-            content = ""
-            for item in msg.content:
-                if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-                    content += item["text"] + "\n"
-        else:
-            # 其他格式直接保留
-            cleaned_messages.append(msg)
-            continue
-
-        content = _clean_trae_message_text(
-            content, msg.role, use_long_ctx=use_long_ctx, msg_char_cap=msg_char_cap
-        )
-
-        # 清理后文本为空仍须保留：tool 轮次、assistant 带 tool_calls（否则会破坏 tool_calls ↔ tool 配对）
-        keep = bool(content) or msg.role == "tool" or bool(msg.tool_calls)
-        if keep:
-            if msg.role == "assistant" and msg.tool_calls and not content:
-                msg.content = None
-            elif msg.role == "tool" and not content:
-                msg.content = ""
-            else:
-                msg.content = content
-            cleaned_messages.append(msg)
-
-    # 控制历史条数（长上下文模型保留更多；仍保留首条 system）
-    if len(cleaned_messages) > history_keep:
-        if cleaned_messages and cleaned_messages[0].role == "system":
-            tail_n = max(history_keep - 1, 1)
-            cleaned_messages = [cleaned_messages[0]] + cleaned_messages[-tail_n:]
-        else:
-            cleaned_messages = cleaned_messages[-history_keep:]
-
-    cleaned_messages = _apply_trae_conversation_normalization(cleaned_messages, ctx)
-    cleaned_messages = _normalize_openai_compatible_messages(cleaned_messages, ctx)
-    cleaned_messages = _apply_path_prefix_rewrites_to_messages(cleaned_messages, ctx)
-
-    # 替换清理后的消息
-    request.messages = cleaned_messages
-
-    # max_tokens 兜底与上限（长上下文模型单独一套，见 config.context）
-    if request.max_tokens is None:
-        request.max_tokens = max_tok_default
-    elif request.max_tokens > max_tok_cap:
-        request.max_tokens = max_tok_cap
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "message": str(e),
+                        "type": "invalid_request_error",
+                        "param": "model",
+                        "code": "model_not_found",
+                    }
+                },
+            )
 
     if request.stream:
+        raw = provider.chat_completion_stream(request, provider_model)
+        ait = raw.__aiter__()
+        try:
+            first = await ait.__anext__()
+        except UpstreamError as e:
+            return JSONResponse(status_code=e.status_code, content=e.body)
+        except StopAsyncIteration:
+
+            async def empty_done():
+                yield b"data: [DONE]\n\n"
+
+            return StreamingResponse(
+                empty_done(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            call_logger.log_call(
+                request=request,
+                provider_name=provider_name,
+                provider_model=provider_model,
+                duration_ms=duration_ms,
+                status="error",
+                error_message=str(e),
+                user_id=current_user["id"],
+                log_meta={"request": build_request_log_meta(request), "error_stage": "stream_open"},
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "message": str(e),
+                        "type": "api_error",
+                        "code": "bad_gateway",
+                    }
+                },
+            )
+
+        async def merged_bytes():
+            yield first
+            async for chunk in ait:
+                yield chunk
+
         return StreamingResponse(
-            _stream_response(request, provider, provider_model, provider_name, start_time, current_user["id"]),
+            _stream_response(
+                request,
+                sse_chunks=merged_bytes(),
+                provider_model=provider_model,
+                provider_name=provider_name,
+                start_time=start_time,
+                user_id=current_user["id"],
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -627,32 +408,21 @@ async def chat_completions(
         )
 
     try:
-        response = await provider.chat_completion(request, provider_model)
-        response.model = request.model
-        response = _apply_path_prefix_rewrites_to_chat_response(response, ctx)
+        data = await provider.chat_completion(request, provider_model)
+        data["model"] = request.model
         duration_ms = int((time.time() - start_time) * 1000)
-        print(f'[LOG] Calling log_call with user_id={current_user["id"]}, type={type(current_user["id"])}')
-        choice0 = response.choices[0] if response.choices else None
-        assistant_text = ""
-        finish_reason = None
-        if choice0:
-            finish_reason = choice0.finish_reason
-            mc = choice0.message.content if choice0.message else None
-            if isinstance(mc, str):
-                assistant_text = mc
-            elif isinstance(mc, list):
-                assistant_text = json.dumps(mc, ensure_ascii=False)
+        finish_reason, assistant_text = _preview_from_completion_body(data)
         log_meta = {
             "request": build_request_log_meta(request),
             "response": {
                 "finish_reason": finish_reason,
-                "assistant_chars": len(assistant_text),
-                "preview": _log_preview_text(assistant_text),
+                "assistant_chars": len(assistant_text or ""),
+                "preview": _log_preview_text(assistant_text or ""),
             },
         }
         call_logger.log_call(
             request=request,
-            response=response,
+            response_body=data,
             provider_name=provider_name,
             provider_model=provider_model,
             duration_ms=duration_ms,
@@ -660,7 +430,20 @@ async def chat_completions(
             user_id=current_user["id"],
             log_meta=log_meta,
         )
-        return response
+        return JSONResponse(content=data, media_type="application/json")
+    except UpstreamError as e:
+        duration_ms = int((time.time() - start_time) * 1000)
+        call_logger.log_call(
+            request=request,
+            provider_name=provider_name,
+            provider_model=provider_model,
+            duration_ms=duration_ms,
+            status="error",
+            error_message=str(e),
+            user_id=current_user["id"],
+            log_meta={"request": build_request_log_meta(request), "error_stage": "chat_completion"},
+        )
+        return JSONResponse(status_code=e.status_code, content=e.body)
     except Exception as e:
         duration_ms = int((time.time() - start_time) * 1000)
         call_logger.log_call(
@@ -671,14 +454,17 @@ async def chat_completions(
             status="error",
             error_message=str(e),
             user_id=current_user["id"],
-            log_meta={
-                "request": build_request_log_meta(request),
-                "error_stage": "chat_completion",
-            },
+            log_meta={"request": build_request_log_meta(request), "error_stage": "chat_completion"},
         )
         return JSONResponse(
             status_code=502,
-            content={"error": {"message": f"Upstream error: {str(e)}"}},
+            content={
+                "error": {
+                    "message": str(e),
+                    "type": "api_error",
+                    "code": "bad_gateway",
+                }
+            },
         )
 
 
@@ -733,7 +519,8 @@ def _stream_log_snapshot(acc: dict) -> tuple[str, int, str]:
 
 async def _stream_response(
     request: ChatCompletionRequest,
-    provider,
+    *,
+    sse_chunks: AsyncIterator[bytes],
     provider_model: str,
     provider_name: str,
     start_time: float,
@@ -741,7 +528,7 @@ async def _stream_response(
 ):
     acc: dict = {"sse_data_events": 0, "sse_json_errors": 0}
     try:
-        async for chunk in provider.chat_completion_stream(request, provider_model):
+        async for chunk in sse_chunks:
             chunk_str = chunk.decode("utf-8")
             for line in chunk_str.split("\n"):
                 try:
@@ -821,7 +608,14 @@ async def _stream_response(
             log_meta=log_meta,
             stream_usage=stream_usage,
         )
-        error_data = json.dumps({"error": {"message": str(e)}})
+        error_payload = {
+            "error": {
+                "message": str(e),
+                "type": "api_error",
+                "code": "bad_gateway",
+            }
+        }
+        error_data = json.dumps(error_payload, ensure_ascii=False)
         yield f"data: {error_data}\n\n".encode("utf-8")
         yield b"data: [DONE]\n\n"
 
