@@ -4,6 +4,7 @@ import json
 import time
 import re
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,7 @@ from app.utils import verify_password, get_password_hash, create_access_token, v
 from app.config import AppConfig, ContextConfig, load_config, ProviderConfig, route_targets_long_context
 from app.logger import CallLogger, build_request_log_meta
 from app.models import (
+    ChatChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
@@ -433,6 +435,88 @@ def _normalize_openai_compatible_messages(
     return out
 
 
+def _path_rewrite_ordered_pairs(ctx: ContextConfig) -> list[tuple[str, str]]:
+    rules = [(r.from_path, r.to_path) for r in ctx.path_prefix_rewrites if r.from_path]
+    return sorted(rules, key=lambda x: len(x[0]), reverse=True)
+
+
+def _rewrite_string_by_prefixes(s: str, pairs: list[tuple[str, str]]) -> str:
+    for old, new in pairs:
+        if s.startswith(old):
+            return new + s[len(old) :]
+    return s
+
+
+def _rewrite_path_strings_in_obj(obj: Any, pairs: list[tuple[str, str]]) -> Any:
+    if isinstance(obj, str):
+        return _rewrite_string_by_prefixes(obj, pairs)
+    if isinstance(obj, dict):
+        return {k: _rewrite_path_strings_in_obj(v, pairs) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_rewrite_path_strings_in_obj(v, pairs) for v in obj]
+    return obj
+
+
+def _rewrite_tool_calls_arguments(
+    tool_calls: list[dict[str, Any]] | None, pairs: list[tuple[str, str]]
+) -> list[dict[str, Any]] | None:
+    if not tool_calls or not pairs:
+        return tool_calls
+    out: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            out.append(tc)
+            continue
+        tc2 = dict(tc)
+        fn = tc2.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            fn2 = dict(fn)
+            try:
+                args = json.loads(fn2["arguments"])
+                fn2["arguments"] = json.dumps(
+                    _rewrite_path_strings_in_obj(args, pairs),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                tc2["function"] = fn2
+            except json.JSONDecodeError:
+                pass
+        out.append(tc2)
+    return out
+
+
+def _apply_path_prefix_rewrites_to_messages(
+    messages: list[ChatMessage], ctx: ContextConfig
+) -> list[ChatMessage]:
+    pairs = _path_rewrite_ordered_pairs(ctx)
+    if not pairs:
+        return messages
+    out: list[ChatMessage] = []
+    for m in messages:
+        mm = m.model_copy(deep=True)
+        if mm.role == "assistant" and mm.tool_calls:
+            mm.tool_calls = _rewrite_tool_calls_arguments(mm.tool_calls, pairs)
+        out.append(mm)
+    return out
+
+
+def _apply_path_prefix_rewrites_to_chat_response(
+    response: ChatCompletionResponse, ctx: ContextConfig
+) -> ChatCompletionResponse:
+    pairs = _path_rewrite_ordered_pairs(ctx)
+    if not pairs or not response.choices:
+        return response
+    new_choices: list[ChatChoice] = []
+    for ch in response.choices:
+        if ch.message and ch.message.tool_calls:
+            msg = ch.message.model_copy(deep=True)
+            msg.tool_calls = _rewrite_tool_calls_arguments(msg.tool_calls, pairs)
+            new_choices.append(ch.model_copy(update={"message": msg}))
+        else:
+            new_choices.append(ch)
+    return response.model_copy(update={"choices": new_choices})
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -520,6 +604,7 @@ async def chat_completions(
 
     cleaned_messages = _apply_trae_conversation_normalization(cleaned_messages, ctx)
     cleaned_messages = _normalize_openai_compatible_messages(cleaned_messages, ctx)
+    cleaned_messages = _apply_path_prefix_rewrites_to_messages(cleaned_messages, ctx)
 
     # 替换清理后的消息
     request.messages = cleaned_messages
@@ -544,6 +629,7 @@ async def chat_completions(
     try:
         response = await provider.chat_completion(request, provider_model)
         response.model = request.model
+        response = _apply_path_prefix_rewrites_to_chat_response(response, ctx)
         duration_ms = int((time.time() - start_time) * 1000)
         print(f'[LOG] Calling log_call with user_id={current_user["id"]}, type={type(current_user["id"])}')
         choice0 = response.choices[0] if response.choices else None

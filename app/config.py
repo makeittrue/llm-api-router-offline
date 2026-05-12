@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProviderConfig(BaseModel):
@@ -28,6 +28,25 @@ class ServerConfig(BaseModel):
 
 class LogConfig(BaseModel):
     db_path: str = "logs.db"
+
+
+class PathPrefixRewrite(BaseModel):
+    """将历史/模型输出里的旧绝对路径前缀换成当前机器的工作区（Trae 工具在本地执行）。"""
+
+    from_path: str
+    to_path: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_from_to_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            d = dict(data)
+            if "from_path" not in d and "from" in d:
+                d["from_path"] = d.pop("from")
+            if "to_path" not in d and "to" in d:
+                d["to_path"] = d.pop("to")
+            return d
+        return data
 
 
 class ContextConfig(BaseModel):
@@ -62,6 +81,9 @@ class ContextConfig(BaseModel):
         "Continue from the IDE conversation context above. "
         "Follow the system instructions; reply helpfully or ask a brief clarifying question if the task is unclear."
     )
+
+    # 对 assistant.tool_calls 里 function.arguments 的 JSON 做字符串值前缀替换（请求入站与非流式响应出站）
+    path_prefix_rewrites: list[PathPrefixRewrite] = Field(default_factory=list)
 
 
 def model_uses_long_context(model: str, ctx: ContextConfig) -> bool:
