@@ -182,7 +182,7 @@ routes:
 
 ### 上下文与长窗口模型（可选 `context`）
 
-用于控制网关对 **Trae 等客户端** 的裁剪强度与 `max_tokens` 兜底。若请求里的 **`model` 字段**（对外模型名，与路由里配置的 `model` 一致）匹配 `long_context_model_substrings` 中任一字串（不区分大小写），则使用 `long_context_*` 一组参数（默认可覆盖 **DeepSeek V4、MiMo 2.5** 等约 1M 上下文场景）；否则使用上方的保守默认值。
+用于控制网关对 **Trae 等客户端** 的裁剪强度与 `max_tokens` 兜底。若请求里的 **`model` 字段**（Trae 里选的对外模型名）或该路由对应的 **`provider_model`（上游真实模型名）** 任一匹配 `long_context_model_substrings` 中任一字串（不区分大小写），则使用 `long_context_*` 一组参数（默认可覆盖 **DeepSeek V4、MiMo 2.5** 等约 1M 上下文场景）；否则使用上方的保守默认值。这样 Trae 里自定义显示名不含 `v4` 时，只要后台路由的上游模型名含 `deepseek-v4` 等，仍会走长上下文策略。
 
 ```yaml
 context:
@@ -192,6 +192,7 @@ context:
   max_tokens_cap: 8192
   long_context_model_substrings:
     - "deepseek-v4"
+    - "deepseek v4"
     - "mimo-2.5"
   long_context_message_char_cap: 800000
   long_context_history_message_keep: 256

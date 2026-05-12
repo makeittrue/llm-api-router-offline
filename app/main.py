@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from app.utils import verify_password, get_password_hash, create_access_token, verify_token
 
-from app.config import AppConfig, load_config, model_uses_long_context, ProviderConfig
+from app.config import AppConfig, load_config, ProviderConfig, route_targets_long_context
 from app.logger import CallLogger
 from app.models import (
     ChatCompletionRequest,
@@ -287,6 +287,32 @@ async def list_models(current_user: dict = Depends(get_current_user)):
     return ModelListResponse(data=unique_models)
 
 
+def _clean_trae_message_text(
+    content: str, role: str, *, use_long_ctx: bool, msg_char_cap: int
+) -> str:
+    """Trae 消息清理。长上下文 + system 仅去掉明确噪声标签，避免 ``` / <tag> 规则误伤整段系统提示词。"""
+    if use_long_ctx and role == "system":
+        content = re.sub(r"<system-reminder>.*?</system-reminder>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<\|｜DSML\|｜.*?>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<user_input>.*?</user_input>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<tool_call_id>.*?</tool_call_id>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<toolcall_status>.*?</toolcall_status>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<toolcall_result>.*?</toolcall_result>", "", content, flags=re.DOTALL)
+    else:
+        content = re.sub(r"<system-reminder>.*?</system-reminder>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<\|｜DSML\|｜.*?>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<user_input>.*?</user_input>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<tool_call_id>.*?</tool_call_id>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<toolcall_status>.*?</toolcall_status>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<toolcall_result>.*?</toolcall_result>", "", content, flags=re.DOTALL)
+        content = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+        content = re.sub(r"<[^>]+>", "", content)
+    content = re.sub(r"\n\s*\n", "\n", content).strip()
+    if msg_char_cap > 0 and len(content) > msg_char_cap:
+        content = content[:msg_char_cap] + "..."
+    return content
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -300,8 +326,27 @@ async def chat_completions(
     # 打印Trae发送的请求参数，排查参数错误问题
     print(f"[DEBUG] Trae request: {json.dumps(request.model_dump(exclude_unset=True), indent=2, ensure_ascii=False)}")
 
+    # 先解析路由，便于用「对外 model + 上游 provider_model」判断是否长上下文（Trae 里自定义名可能不含 v4 字样）
+    user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
+    if user_route:
+        provider_config = ProviderConfig(
+            name=user_route["provider_name"],
+            base_url=user_route["provider_base_url"],
+            api_key=user_route["provider_api_key"],
+            api_type=user_route["provider_api_type"],
+        )
+        provider = create_provider(provider_config)
+        provider_model = user_route["provider_model"]
+        provider_name = user_route["provider_name"]
+    else:
+        try:
+            provider, provider_model = router.resolve(request.model)
+            provider_name = provider.config.name
+        except ValueError as e:
+            return JSONResponse(status_code=404, content={"error": {"message": str(e)}})
+
     ctx = app_config.context
-    use_long_ctx = model_uses_long_context(request.model, ctx)
+    use_long_ctx = route_targets_long_context(request.model, provider_model, ctx)
     if use_long_ctx:
         msg_char_cap = ctx.long_context_message_char_cap
         history_keep = ctx.long_context_history_message_keep
@@ -329,33 +374,16 @@ async def chat_completions(
             # 其他格式直接保留
             cleaned_messages.append(msg)
             continue
-        
-        # 执行清理逻辑
-        # 移除<system-reminder>包裹的内容
-        content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL)
-        # 移除Trae特有的工具调用标记
-        content = re.sub(r'<\|｜DSML\|｜.*?>', '', content, flags=re.DOTALL)
-        # 移除<user_input>标签和内容
-        content = re.sub(r'<user_input>.*?</user_input>', '', content, flags=re.DOTALL)
-        # 移除工具调用和返回相关的标签
-        content = re.sub(r'<tool_call_id>.*?</tool_call_id>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<toolcall_status>.*?</toolcall_status>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<toolcall_result>.*?</toolcall_result>', '', content, flags=re.DOTALL)
-        # 移除markdown代码块标记
-        content = re.sub(r'```.*?```', '', content, flags=re.DOTALL)
-        # 移除所有其他的<>包裹的标签内容
-        content = re.sub(r'<[^>]+>', '', content)
-        # 移除多余的空行和空白
-        content = re.sub(r'\n\s*\n', '\n', content).strip()
-        # 每条消息最大字符数（长上下文模型由 config.context 放宽）
-        if msg_char_cap > 0 and len(content) > msg_char_cap:
-            content = content[:msg_char_cap] + "..."
-        
+
+        content = _clean_trae_message_text(
+            content, msg.role, use_long_ctx=use_long_ctx, msg_char_cap=msg_char_cap
+        )
+
         # 如果清理后内容为空，跳过这条消息
         if content:
             msg.content = content
             cleaned_messages.append(msg)
-    
+
     # 控制历史条数（长上下文模型保留更多；仍保留首条 system）
     if len(cleaned_messages) > history_keep:
         if cleaned_messages and cleaned_messages[0].role == "system":
@@ -363,7 +391,7 @@ async def chat_completions(
             cleaned_messages = [cleaned_messages[0]] + cleaned_messages[-tail_n:]
         else:
             cleaned_messages = cleaned_messages[-history_keep:]
-    
+
     # 替换清理后的消息
     request.messages = cleaned_messages
 
@@ -372,27 +400,6 @@ async def chat_completions(
         request.max_tokens = max_tok_default
     elif request.max_tokens > max_tok_cap:
         request.max_tokens = max_tok_cap
-
-    # 优先匹配用户自己的路由
-    user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
-    if user_route:
-        # 动态创建provider
-        provider_config = ProviderConfig(
-            name=user_route["provider_name"],
-            base_url=user_route["provider_base_url"],
-            api_key=user_route["provider_api_key"],
-            api_type=user_route["provider_api_type"],
-        )
-        provider = create_provider(provider_config)
-        provider_model = user_route["provider_model"]
-        provider_name = user_route["provider_name"]
-    else:
-        # 匹配全局路由
-        try:
-            provider, provider_model = router.resolve(request.model)
-            provider_name = provider.config.name
-        except ValueError as e:
-            return JSONResponse(status_code=404, content={"error": {"message": str(e)}})
 
     if request.stream:
         return StreamingResponse(

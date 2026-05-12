@@ -44,6 +44,7 @@ class ContextConfig(BaseModel):
         default_factory=lambda: [
             "deepseek-v4",
             "deepseek_v4",
+            "deepseek v4",
             "mimo-2.5",
             "mimo_2.5",
             "mimo2.5",
@@ -59,6 +60,17 @@ class ContextConfig(BaseModel):
 def model_uses_long_context(model: str, ctx: ContextConfig) -> bool:
     m = model.lower()
     return any(p.lower() in m for p in ctx.long_context_model_substrings if p)
+
+
+def route_targets_long_context(
+    request_model: str, provider_model: str | None, ctx: ContextConfig
+) -> bool:
+    """对外 model 或上游 provider_model 任一命中长上下文名单即视为长窗口路由。"""
+    if model_uses_long_context(request_model, ctx):
+        return True
+    if provider_model and model_uses_long_context(provider_model, ctx):
+        return True
+    return False
 
 
 class AppConfig(BaseModel):
