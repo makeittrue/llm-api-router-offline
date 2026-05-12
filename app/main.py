@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app.utils import verify_password, get_password_hash, create_access_token, verify_token
 
 from app.config import AppConfig, load_config, ProviderConfig, route_targets_long_context
-from app.logger import CallLogger
+from app.logger import CallLogger, build_request_log_meta
 from app.models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -416,8 +416,25 @@ async def chat_completions(
         response = await provider.chat_completion(request, provider_model)
         response.model = request.model
         duration_ms = int((time.time() - start_time) * 1000)
-        # 测试：确认user_id存在
         print(f'[LOG] Calling log_call with user_id={current_user["id"]}, type={type(current_user["id"])}')
+        choice0 = response.choices[0] if response.choices else None
+        assistant_text = ""
+        finish_reason = None
+        if choice0:
+            finish_reason = choice0.finish_reason
+            mc = choice0.message.content if choice0.message else None
+            if isinstance(mc, str):
+                assistant_text = mc
+            elif isinstance(mc, list):
+                assistant_text = json.dumps(mc, ensure_ascii=False)
+        log_meta = {
+            "request": build_request_log_meta(request),
+            "response": {
+                "finish_reason": finish_reason,
+                "assistant_chars": len(assistant_text),
+                "preview": _log_preview_text(assistant_text),
+            },
+        }
         call_logger.log_call(
             request=request,
             response=response,
@@ -426,6 +443,7 @@ async def chat_completions(
             duration_ms=duration_ms,
             status="success",
             user_id=current_user["id"],
+            log_meta=log_meta,
         )
         return response
     except Exception as e:
@@ -438,11 +456,64 @@ async def chat_completions(
             status="error",
             error_message=str(e),
             user_id=current_user["id"],
+            log_meta={
+                "request": build_request_log_meta(request),
+                "error_stage": "chat_completion",
+            },
         )
         return JSONResponse(
             status_code=502,
             content={"error": {"message": f"Upstream error: {str(e)}"}},
         )
+
+
+def _log_preview_text(text: str, max_total: int = 4000) -> str:
+    if len(text) <= max_total:
+        return text
+    h = max_total // 2
+    return text[:h] + "\n…\n" + text[-h:]
+
+
+def _accumulate_stream_sse_line(line: str, acc: dict) -> None:
+    if not line.startswith("data: "):
+        return
+    body = line[6:].strip()
+    if body == "[DONE]":
+        return
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        acc["sse_json_errors"] = acc.get("sse_json_errors", 0) + 1
+        return
+    acc["sse_data_events"] = acc.get("sse_data_events", 0) + 1
+    if data.get("id"):
+        acc.setdefault("upstream_response_id", data["id"])
+    u = data.get("usage")
+    if isinstance(u, dict) and (
+        u.get("prompt_tokens") is not None
+        or u.get("completion_tokens") is not None
+        or u.get("total_tokens") is not None
+    ):
+        acc["usage"] = u
+    for choice in data.get("choices") or []:
+        if choice.get("finish_reason"):
+            acc["finish_reason"] = choice["finish_reason"]
+        delta = choice.get("delta") or {}
+        c = delta.get("content")
+        if isinstance(c, str) and c:
+            acc.setdefault("_text_parts", []).append(c)
+        r = delta.get("reasoning_content")
+        if isinstance(r, str) and r:
+            acc.setdefault("_reason_parts", []).append(r)
+
+
+def _stream_log_snapshot(acc: dict) -> tuple[str, int, str]:
+    text = "".join(acc.get("_text_parts", []))
+    reason = "".join(acc.get("_reason_parts", []))
+    preview_body = text
+    if reason:
+        preview_body = text + "\n--- reasoning ---\n" + reason
+    return text, len(reason), _log_preview_text(preview_body)
 
 
 async def _stream_response(
@@ -453,22 +524,41 @@ async def _stream_response(
     start_time: float,
     user_id: int,
 ):
-    total_content = ""
+    acc: dict = {"sse_data_events": 0, "sse_json_errors": 0}
     try:
         async for chunk in provider.chat_completion_stream(request, provider_model):
-            try:
-                chunk_str = chunk.decode("utf-8")
-                for line in chunk_str.split("\n"):
-                    if line.startswith("data: ") and line[6:].strip() != "[DONE]":
-                        data = json.loads(line[6:])
-                        for choice in data.get("choices", []):
-                            delta = choice.get("delta", {})
-                            total_content += delta.get("content", "")
-            except Exception:
-                pass
+            chunk_str = chunk.decode("utf-8")
+            for line in chunk_str.split("\n"):
+                try:
+                    _accumulate_stream_sse_line(line, acc)
+                except Exception:
+                    acc["sse_parse_exceptions"] = acc.get("sse_parse_exceptions", 0) + 1
             yield chunk
 
         duration_ms = int((time.time() - start_time) * 1000)
+        text, reason_len, preview = _stream_log_snapshot(acc)
+        usage = acc.get("usage")
+        stream_usage = None
+        if isinstance(usage, dict):
+            stream_usage = {
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+            }
+        log_meta = {
+            "request": build_request_log_meta(request),
+            "stream": {
+                "sse_data_events": acc.get("sse_data_events", 0),
+                "sse_json_errors": acc.get("sse_json_errors", 0),
+                "sse_parse_exceptions": acc.get("sse_parse_exceptions", 0),
+                "upstream_response_id": acc.get("upstream_response_id"),
+                "finish_reason": acc.get("finish_reason"),
+                "usage_raw": usage,
+                "assistant_text_chars": len(text),
+                "assistant_reasoning_chars": reason_len,
+            },
+            "response_preview": preview,
+        }
         call_logger.log_call(
             request=request,
             provider_name=provider_name,
@@ -476,9 +566,35 @@ async def _stream_response(
             duration_ms=duration_ms,
             status="success",
             user_id=user_id,
+            log_meta=log_meta,
+            stream_usage=stream_usage,
         )
     except Exception as e:
         duration_ms = int((time.time() - start_time) * 1000)
+        text, reason_len, preview = _stream_log_snapshot(acc)
+        usage = acc.get("usage")
+        stream_usage = None
+        if isinstance(usage, dict):
+            stream_usage = {
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+            }
+        log_meta = {
+            "request": build_request_log_meta(request),
+            "stream": {
+                "sse_data_events": acc.get("sse_data_events", 0),
+                "sse_json_errors": acc.get("sse_json_errors", 0),
+                "sse_parse_exceptions": acc.get("sse_parse_exceptions", 0),
+                "upstream_response_id": acc.get("upstream_response_id"),
+                "finish_reason": acc.get("finish_reason"),
+                "usage_raw": usage,
+                "assistant_text_chars": len(text),
+                "assistant_reasoning_chars": reason_len,
+            },
+            "response_preview": preview or None,
+            "error_stage": "stream",
+        }
         call_logger.log_call(
             request=request,
             provider_name=provider_name,
@@ -487,6 +603,8 @@ async def _stream_response(
             status="error",
             error_message=str(e),
             user_id=user_id,
+            log_meta=log_meta,
+            stream_usage=stream_usage,
         )
         error_data = json.dumps({"error": {"message": str(e)}})
         yield f"data: {error_data}\n\n".encode("utf-8")

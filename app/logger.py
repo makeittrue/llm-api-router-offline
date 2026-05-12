@@ -9,6 +9,35 @@ from typing import Any
 from app.models import ChatCompletionRequest, ChatCompletionResponse
 
 
+def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
+    roles: list[str] = []
+    message_chars: list[dict[str, Any]] = []
+    last_user_preview: str | None = None
+    for m in request.messages:
+        roles.append(m.role)
+        c = m.content
+        if isinstance(c, str):
+            ln = len(c)
+            if m.role == "user":
+                tail = c[:400] + ("…" if len(c) > 400 else "")
+                last_user_preview = tail
+        elif isinstance(c, list):
+            ln = sum(len(str(p)) for p in c)
+        else:
+            ln = 0
+        message_chars.append({"role": m.role, "chars": ln})
+    return {
+        "message_count": len(request.messages),
+        "roles": roles,
+        "has_user": "user" in roles,
+        "last_user_preview": last_user_preview,
+        "message_chars": message_chars,
+        "max_tokens": request.max_tokens,
+        "temperature": request.temperature,
+        "stream": bool(request.stream),
+    }
+
+
 class CallLogger:
     def __init__(self, db_path: str = "logs.db"):
         self.db_path = db_path
@@ -33,7 +62,8 @@ class CallLogger:
                 user_id TEXT,
                 request_messages TEXT,
                 created_at TEXT NOT NULL,
-                duration_ms INTEGER DEFAULT 0
+                duration_ms INTEGER DEFAULT 0,
+                log_meta TEXT
             )
         """)
         conn.execute("""
@@ -46,6 +76,9 @@ class CallLogger:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_call_logs_user_id_created_at ON call_logs(user_id, created_at DESC)
         """)
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(call_logs)").fetchall()}
+        if "log_meta" not in existing:
+            conn.execute("ALTER TABLE call_logs ADD COLUMN log_meta TEXT")
         
         # 用户表
         conn.execute("""
@@ -257,6 +290,8 @@ class CallLogger:
         status: str = "success",
         error_message: str | None = None,
         user_id: int | None = None,
+        log_meta: dict[str, Any] | None = None,
+        stream_usage: dict[str, int] | None = None,
     ):
         conn = sqlite3.connect(self.db_path)
         try:
@@ -264,10 +299,20 @@ class CallLogger:
             request_id = response.id if response else None
             is_stream = 1 if request.stream else 0
 
+            if stream_usage:
+                pt = int(stream_usage.get("prompt_tokens") or 0)
+                ct = int(stream_usage.get("completion_tokens") or 0)
+                tt = int(stream_usage.get("total_tokens") or 0)
+            elif usage:
+                pt, ct, tt = usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+            else:
+                pt = ct = tt = 0
+
             messages_json = json.dumps(
                 [m.model_dump(exclude_none=True) for m in request.messages],
                 ensure_ascii=False,
             )
+            log_meta_json = json.dumps(log_meta, ensure_ascii=False) if log_meta else None
 
             conn.execute(
                 """
@@ -275,17 +320,17 @@ class CallLogger:
                     request_id, model, provider, provider_model,
                     prompt_tokens, completion_tokens, total_tokens,
                     is_stream, status, error_message, user_id,
-                    request_messages, created_at, duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    request_messages, created_at, duration_ms, log_meta
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
                     request.model,
                     provider_name,
                     provider_model,
-                    usage.prompt_tokens if usage else 0,
-                    usage.completion_tokens if usage else 0,
-                    usage.total_tokens if usage else 0,
+                    pt,
+                    ct,
+                    tt,
                     is_stream,
                     status,
                     error_message,
@@ -293,6 +338,7 @@ class CallLogger:
                     messages_json,
                     datetime.now(timezone.utc).isoformat(),
                     duration_ms,
+                    log_meta_json,
                 ),
             )
             conn.commit()
