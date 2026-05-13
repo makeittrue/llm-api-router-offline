@@ -79,6 +79,11 @@ class OpenAICompatibleProvider(BaseProvider):
     def _build_payload(self, request: ChatCompletionRequest, provider_model: str) -> dict[str, Any]:
         payload = request.model_dump(mode="python", exclude_none=True)
         payload["model"] = provider_model
+        # Trae / 新版 OpenAI SDK 会带 stream_options；多数自建兼容服务（vLLM、部分 MiMo 网关）不认该字段 → 400 Param Incorrect
+        payload.pop("stream_options", None)
+        # 同时传两个上限时，部分上游只接受其一
+        if payload.get("max_tokens") is not None and payload.get("max_completion_tokens") is not None:
+            payload.pop("max_completion_tokens", None)
         return payload
 
     async def chat_completion(
@@ -127,7 +132,8 @@ class OpenAICompatibleProvider(BaseProvider):
                         print(f"[DEBUG] Stream error response content: {text}")
                         raise UpstreamError.from_text(resp.status_code, text)
 
-                    async for chunk in resp.aiter_raw():
+                    # 必须用 aiter_bytes：aiter_raw 为未解压的 gzip/deflate，直接转发会导致客户端 SSE 解码失败
+                    async for chunk in resp.aiter_bytes():
                         yield chunk
         except UpstreamError:
             raise

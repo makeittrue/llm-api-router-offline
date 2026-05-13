@@ -529,7 +529,8 @@ async def _stream_response(
     acc: dict = {"sse_data_events": 0, "sse_json_errors": 0}
     try:
         async for chunk in sse_chunks:
-            chunk_str = chunk.decode("utf-8")
+            # 分块边界可能截断多字节 UTF-8；日志解析用替换策略，避免整路流因解码异常中断
+            chunk_str = chunk.decode("utf-8", errors="replace")
             for line in chunk_str.split("\n"):
                 try:
                     _accumulate_stream_sse_line(line, acc)
