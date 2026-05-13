@@ -420,6 +420,31 @@
             });
         });
 
+        // 更新日志筛选器的模型选项
+        function updateModelFilter(routes) {
+            const select = document.getElementById("log-model-filter");
+            const currentValue = select.value;
+            
+            // 清空除了"所有模型"选项之外的所有选项
+            select.innerHTML = '<option value="">所有模型</option>';
+            
+            // 从路由列表中提取唯一的模型名称
+            const models = [...new Set(routes.map(route => route.model))].sort();
+            
+            // 添加模型选项
+            models.forEach(model => {
+                const option = document.createElement("option");
+                option.value = model;
+                option.textContent = model;
+                select.appendChild(option);
+            });
+            
+            // 恢复之前选中的值（如果仍然存在）
+            if (currentValue && models.includes(currentValue)) {
+                select.value = currentValue;
+            }
+        }
+
         // 加载用户路由列表
         async function loadUserRoutes() {
             try {
@@ -449,6 +474,9 @@
                 });
                 
                 document.getElementById("total-routes").textContent = data.routes.length;
+                
+                // 更新日志筛选器的模型选项
+                updateModelFilter(data.routes);
 
                 // 绑定编辑和删除事件
                 document.querySelectorAll(".edit-btn").forEach(btn => {
