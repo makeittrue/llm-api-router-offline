@@ -17,6 +17,8 @@ class ChatMessage(BaseModel):
     name: str | None = None
     tool_calls: Any | None = None
     tool_call_id: str | None = None
+    # MiMo / DeepSeek 等思考链：多轮对话必须把上一轮 assistant 的推理原文回传，否则上游 400
+    reasoning_content: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):

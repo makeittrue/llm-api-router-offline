@@ -42,6 +42,9 @@ _OPENAI_MESSAGE_KEYS = frozenset(
         "tool_calls",
         "tool_call_id",
         "function_call",
+        # 小米 MiMo thinking 模式：见上游错误 param「reasoning_content ... must be passed back」
+        "reasoning_content",
+        "reasoning",
     }
 )
 
