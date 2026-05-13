@@ -29,9 +29,14 @@ cd /opt/llm-api-router
 #### 2. 配置核心参数（必须修改）
 
 ```bash
-# 修改JWT密钥，生产环境必须替换为随机字符串
-vim app/utils.py
-# 找到 SECRET_KEY = "xxx" 修改为自己的密钥，可通过 `openssl rand -hex 32` 生成
+# JWT 签名密钥：必须通过环境变量设置（生产环境禁止使用默认内置密钥）
+# 生成随机密钥示例：
+#   openssl rand -hex 32
+# 在 systemd、shell 或 .env 中设置其一即可：
+#   export LLM_ROUTER_JWT_SECRET="$(openssl rand -hex 32)"
+# 兼容别名：若未设置 LLM_ROUTER_JWT_SECRET，可设置 SECRET_KEY。
+# Token 有效期（天，可选，默认 7）：
+#   export LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS=30
 
 # 配置全局服务商（可选，所有用户共用的大模型配置）
 vim config.yaml
@@ -54,6 +59,11 @@ pip install bcrypt==3.2.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 #### 4. 配置Systemd守护进程
 
+**切勿**把下面示例里的 `Environment=LLM_ROUTER_JWT_SECRET=请替换为...` **原样保留**：若 systemd 以该字面量作为密钥，网关虽能启动，但属于弱且固定的密钥。请二选一：
+
+1. **推荐**：创建 `/etc/llm-api-router.env`（`chmod 600`），内容为一行真实密钥，例如 `LLM_ROUTER_JWT_SECRET=` + `openssl rand -hex 32` 的输出；在 unit 中使用 `EnvironmentFile=-/etc/llm-api-router.env`，并**删除**示例中的 `Environment=LLM_ROUTER_JWT_SECRET=...` 整行。  
+2. **或**：将 `Environment=` 一行中的占位整段替换为 `LLM_ROUTER_JWT_SECRET=<你的随机串>`（长度须 ≥ 16，与程序校验一致）。
+
 ```bash
 sudo tee /etc/systemd/system/llm-api-router.service <<-'EOF'
 [Unit]
@@ -62,6 +72,9 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/llm-api-router
+# 推荐：/etc/llm-api-router.env 内写 LLM_ROUTER_JWT_SECRET=真实随机串，然后启用下一行并删除下一行的 Environment=
+# EnvironmentFile=-/etc/llm-api-router.env
+Environment=LLM_ROUTER_JWT_SECRET=请替换为openssl_rand_hex32的输出
 ExecStart=/opt/llm-api-router/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
 Restart=always
 RestartSec=3
@@ -84,6 +97,9 @@ sudo systemctl enable --now llm-api-router
 # 查看服务状态，看到active(running)即为成功
 sudo systemctl status llm-api-router
 
+# 确认 unit 已加载环境（勿在公共日志中打印含密钥的完整输出）
+sudo systemctl show llm-api-router -p Environment --no-pager
+
 # 测试健康检查接口
 curl http://localhost:8000/health
 # 返回 {"status":"ok"} 说明服务正常
@@ -98,7 +114,7 @@ curl http://localhost:8000/health
 ```bash
 git clone <你的仓库地址> /opt/llm-api-router
 cd /opt/llm-api-router
-# 修改app/utils.py和config.yaml配置，同上
+# 设置环境变量 LLM_ROUTER_JWT_SECRET（及可选的 config.yaml），同上节「配置核心参数」
 ```
 
 #### 2. 安装Docker和Docker Compose

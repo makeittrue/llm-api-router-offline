@@ -28,13 +28,101 @@ SQLite存储所有调用记录，包含调用时间、token使用量、耗时、
 ✅ **流式响应支持**  
 支持流式输出，和OpenAI流式响应格式完全一致。
 
-## 🚧 开发计划（待办）
-1. Demo网站正在搭建中
-2. 增加费用限制功能，支持分路由统计用量（需要配置计费规则）
-3. 支持用量达到阈值通知功能（可配置飞书、企业微信、邮件等通知渠道）
-4. 扩展更多应用场景支持
+## 开发路线图（落地顺序）
+
+以下按**推荐实施顺序**排列：先做工程卫生与密钥治理，再计费配额与上下文能力，随后韧性/审计/规模化与测试，最后 Demo 与产品叙事（P9/P1 也可在 P7 之后并行推进）。条目可直接作为 issue 拆分；前缀 **Pxx** 便于在 PR 标题中引用。
+
+### P10 — 工程卫生（优先）
+
+- [x] `app/utils.py`：JWT 密钥与 `ACCESS_TOKEN_EXPIRE_DAYS` 从环境变量读取；缺省时在文档中标明仅限开发；更新 `DEPLOY.md` / 本文「快速开始」中的必填项说明
+- [ ] 引入标准 `logging`（可选 uvicorn/logger 配置），替换 `app/main.py`、`app/providers/base.py` 中对请求与 payload 的 `print`
+- [ ] 删除 `app/main.py` 中重复注册的 `GET /health`，保留单一实现并核对 OpenAPI
+- [ ] （可选）新增 `.env.example`：仅列出变量名与说明，不包含真实密钥
+
+### P4 — 安全：用户路由 API Key
+
+- [ ] 选定应用级加密方案（如 Fernet + 环境变量 `ROUTER_DATA_KEY`），文档说明密钥轮换与备份要求
+- [ ] `user_routes.provider_api_key`：写入前加密、读出解密；兼容存量明文的一次性迁移（启动时或独立迁移脚本）
+- [ ] 管理后台与 API：列表/表单仅展示脱敏 Key（如 `sk-***abcd`），不向浏览器返回完整明文
+- [ ] README：与「加密存储」实际行为一致；补充数据密钥丢失后的不可恢复说明
+
+### P5 — 权限：管理员与普通用户
+
+- [ ] 数据模型：`users` 表增加 `role`（admin/user）或 `is_admin`；迁移策略：首个注册用户为 admin，或由环境变量指定管理员用户名
+- [ ] FastAPI：`require_admin` 依赖，校验 JWT 与库中角色一致
+- [ ] `GET /v1/admin/routes`、`GET /v1/admin/providers` 仅管理员可访问，普通用户返回 403
+- [ ] `static/admin.html`：非管理员隐藏「全局服务商/路由」或只读提示，与 API 行为一致
+
+### P2 — 计费 MVP
+
+- [ ] 计费配置：在 `config.yaml` 或数据库中定义模型/路由维度的单价（如每 1K input/output token）及生效时间
+- [ ] 聚合查询：基于 `call_logs` 按日/周/月汇总 token 与估算费用（SQLite SQL 或后台任务）
+- [ ] API：如 `GET /v1/billing/summary`（路径可调整）返回周期用量与费用，与用户隔离
+- [ ] 管理后台：用量统计增加费用列或独立「账单」页；可选 CSV/JSON 导出
+
+### P3 — 配额与告警
+
+- [ ] 配额模型：用户级或「用户 + 模型」级的日度/月度 token 或调用次数上限（存 DB 或配置）
+- [ ] 请求前置：在 `chat_completions` 转发前校验配额；超额返回 OpenAI 风格错误与可读文案
+- [ ] 通知抽象：定义 `Notifier` 接口（如 webhook）；占位实现 + 飞书或企业微信之一的最小可用适配器
+- [ ] 阈值：配额达到 80% / 100% 时触发通知（同步计数或定时扫描 `call_logs`）
+
+### P7 — 上下文与 Trae 相关（`ContextConfig` 落地）
+
+- [ ] 实现请求预处理模块：读取 `AppConfig.context`（消息裁剪、合并连续 assistant、synthetic user、路径前缀替换等）
+- [ ] 在流式/非流式 `chat_completions` 调用上游前接入预处理；按 `route_targets_long_context` 选用正确上限
+- [ ] 按需接入 `tiktoken` 做 token 级裁剪；若仅字符级裁剪，须在文档中明确说明
+- [ ] README 与 `config.yaml` 示例与真实行为对齐；若有调试/关闭裁剪开关则写入文档
+
+### P8 — 路由韧性
+
+- [ ] httpx 层：对 429 / 502 / 503 可配置重试与指数退避（区分流式与非流式）
+- [ ] 限流：按 `user_id` 或 IP 的滑动窗口（如 slowapi）；配置项放入 `config.yaml`
+- [ ] （可选）同一对外 `model` 配置主备上游，失败自动切换并打日志标签
+
+### P6 — 审计与可观测
+
+- [ ] 日志查询：支持按 `status`、时间范围、错误子串筛选；必要时增加索引（如 `user_id` + `status` + `created_at`）
+- [ ] 管理端：错误信息聚合（按 `error_message` 归一统计 Top N）接口或页面
+- [ ] （可选）操作审计表：登录、改路由、改配额等管理类写操作
+
+### P11 — 规模化：超越单机 SQLite
+
+- [ ] 文档：多实例部署下 SQLite 的局限与迁移检查清单（锁、备份等）
+- [ ] 抽象数据访问层；优先实现 PostgreSQL（或 MySQL）方言的日志与用户路由存储（可引入 SQLAlchemy 最小子集）
+
+### P12 — 自动化测试
+
+- [ ] 引入 pytest + httpx ASGI Client；fixtures 使用内存库或临时 SQLite
+- [ ] Mock 上游：覆盖私有路由优先、全局路由、404 model、流式首包错误、非流式 `UpstreamError`
+- [ ] 覆盖管理员鉴权、配额耗尽、（若已实现）请求预处理边界
+
+### P9 — Demo 与分发
+
+- [ ] `docker-compose`：增加 `demo` profile 或独立 compose（资源限制、只读演示账号说明）
+- [ ] 提供 Nginx / Caddy HTTPS 反代示例与「首次 curl 自检」文档段落
+
+### P1 — 产品叙事与文案
+
+- [ ] 选定产品主轴（IDE/Trae、企业内部网关、个人聚合等）后重写 README 开篇：一句话价值、典型用户、明确非目标边界
+- [ ] 欢迎页 `/` 与管理后台文案与主轴一致；将本路线图中的已完成项勾选或链接到 milestone/issue
+
+---
+
+**历史简述（已并入上文各阶段）**：Demo 站点、分路由计费与用量、阈值通知（飞书/企微/邮件）、更多应用场景，均体现在 P9、P2、P3 与 P1 中。
 
 ## 快速开始
+
+### 环境变量（JWT）
+
+| 变量名 | 生产环境 | 说明 |
+|--------|----------|------|
+| `LLM_ROUTER_JWT_SECRET` | **必填** | 用于签发与校验用户 JWT 的 HMAC 密钥；**长度须 ≥ 16**（代码校验），生产建议使用 `openssl rand -hex 32`。 |
+| `SECRET_KEY` | 二选一 | 仅当**未设置** `LLM_ROUTER_JWT_SECRET` 时作为回退；**若两者同时存在，始终以 `LLM_ROUTER_JWT_SECRET` 为准**。 |
+| `LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS` | 可选 | 访问令牌有效天数，正整数，**默认 `7`**。 |
+
+- 同一台机器上若已有其它应用使用通用名 `SECRET_KEY`（如 Django / Flask），为避免网关误读他人配置，**请为本项目单独设置 `LLM_ROUTER_JWT_SECRET`**，而不要依赖 `SECRET_KEY`。
+- 若上述两个密钥变量均未设置，服务会使用**仅适用于本地开发**的内置默认密钥，并在导入 `app.utils` 时发出 `UserWarning`。**生产部署必须设置 `LLM_ROUTER_JWT_SECRET`（或足够长的 `SECRET_KEY`）。**
 
 ### 1. 安装依赖
 ```bash

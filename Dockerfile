@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # 先复制requirements.txt，利用Docker缓存
