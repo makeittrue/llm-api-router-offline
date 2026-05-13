@@ -642,12 +642,16 @@ async def _stream_response(
 @app.get("/v1/logs")
 async def get_logs(
     model: str | None = None,
-    limit: int = 50,
+    limit: int = 20,
     offset: int = 0,
     current_user: dict = Depends(get_current_user)
 ):
-    logs = call_logger.query_logs(user_id=current_user["id"], model=model, limit=limit, offset=offset)
-    return {"data": logs}
+    uid = current_user["id"]
+    limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
+    total = call_logger.count_logs(user_id=uid, model=model)
+    logs = call_logger.query_logs(user_id=uid, model=model, limit=limit, offset=offset)
+    return {"data": logs, "total": total, "limit": limit, "offset": offset}
 
 
 @app.get("/v1/logs/summary")

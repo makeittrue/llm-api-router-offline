@@ -442,6 +442,28 @@ class CallLogger:
         finally:
             conn.close()
 
+    def count_logs(
+        self,
+        user_id: int | None = None,
+        model: str | None = None,
+    ) -> int:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conditions = []
+            params: list[Any] = []
+            if user_id:
+                conditions.append("user_id = ?")
+                params.append(str(user_id))
+            if model:
+                conditions.append("model = ?")
+                params.append(model)
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            sql = f"SELECT COUNT(*) FROM call_logs {where_clause}"
+            row = conn.execute(sql, params).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        finally:
+            conn.close()
+
     def get_usage_summary(
         self, user_id: int | None = None, model: str | None = None, month: str | None = None
     ) -> list[dict[str, Any]]:

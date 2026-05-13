@@ -273,6 +273,13 @@
                         </tbody>
                     </table>
                 </div>
+                <div id="logs-pagination" class="mt-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-gray-600 border-t border-gray-200 pt-4">
+                    <span id="logs-pagination-info">—</span>
+                    <div class="flex items-center gap-2">
+                        <button type="button" id="logs-prev-page" class="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed" disabled>上一页</button>
+                        <button type="button" id="logs-next-page" class="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed" disabled>下一页</button>
+                    </div>
+                </div>
             </div>
 
             <!-- 用量统计内容 -->
@@ -323,6 +330,8 @@
 
     <script>
         let currentEditingRouteId = null;
+        let logsPage = 0;
+        const LOG_PAGE_SIZE = 20;
 
         // 带Token的fetch封装
         async function authFetch(url, options = {}) {
@@ -497,6 +506,22 @@
             }
         }
 
+        function updateLogsPagination(total) {
+            const totalSafe = typeof total === "number" && !Number.isNaN(total) ? total : 0;
+            const totalPages = totalSafe === 0 ? 1 : Math.ceil(totalSafe / LOG_PAGE_SIZE);
+            const currentDisplay = totalSafe === 0 ? 1 : Math.min(logsPage + 1, totalPages);
+            const info = document.getElementById("logs-pagination-info");
+            const prevBtn = document.getElementById("logs-prev-page");
+            const nextBtn = document.getElementById("logs-next-page");
+            if (!info || !prevBtn || !nextBtn) return;
+            info.textContent =
+                totalSafe === 0
+                    ? "共 0 条"
+                    : `共 ${totalSafe} 条 · 第 ${currentDisplay} / ${totalPages} 页`;
+            prevBtn.disabled = logsPage <= 0 || totalSafe === 0;
+            nextBtn.disabled = totalSafe === 0 || (logsPage + 1) * LOG_PAGE_SIZE >= totalSafe;
+        }
+
         // 加载日志
         async function loadLogs() {
             const tbody = document.getElementById("logs-table-body");
@@ -513,12 +538,22 @@
             
             try {
                 const model = document.getElementById("log-model-filter").value;
-                const url = `/v1/logs?limit=10${model ? `&model=${encodeURIComponent(model)}` : ""}`;
+                const offset = logsPage * LOG_PAGE_SIZE;
+                const url = `/v1/logs?limit=${LOG_PAGE_SIZE}&offset=${offset}${
+                    model ? `&model=${encodeURIComponent(model)}` : ""
+                }`;
                 const res = await authFetch(url);
                 const data = await res.json();
-                
+                const total = typeof data.total === "number" ? data.total : data.data.length;
+
+                if (logsPage > 0 && offset >= total && total > 0) {
+                    logsPage = Math.max(0, Math.ceil(total / LOG_PAGE_SIZE) - 1);
+                    return loadLogs();
+                }
+
                 // 收到响应后清空加载态，渲染数据
                 tbody.innerHTML = "";
+                updateLogsPagination(total);
                 
                 data.data.forEach(log => {
                     const tr = document.createElement("tr");
@@ -579,6 +614,8 @@
                 });
             } catch (e) {
                 console.error("加载日志失败", e);
+                const info = document.getElementById("logs-pagination-info");
+                if (info) info.textContent = "加载失败";
                 tbody.innerHTML = `
                     <tr>
                         <td colspan="6" class="px-6 py-12 text-center text-red-500">
@@ -956,7 +993,20 @@
             document.getElementById("refresh-logs").addEventListener("click", loadLogs);
             
             // 日志筛选变化
-            document.getElementById("log-model-filter").addEventListener("change", loadLogs);
+            document.getElementById("log-model-filter").addEventListener("change", () => {
+                logsPage = 0;
+                loadLogs();
+            });
+
+            document.getElementById("logs-prev-page").addEventListener("click", () => {
+                if (logsPage <= 0) return;
+                logsPage -= 1;
+                loadLogs();
+            });
+            document.getElementById("logs-next-page").addEventListener("click", () => {
+                logsPage += 1;
+                loadLogs();
+            });
             
             // 图表月份筛选变化
             document.getElementById("chart-month-filter").addEventListener("change", loadCharts);

@@ -344,7 +344,7 @@ GET /v1/models
 ```
 GET /v1/logs?model=<模型名>&limit=<条数>&offset=<偏移>
 ```
-返回当前用户的调用日志列表，需要鉴权。
+返回当前用户的调用日志列表，需要鉴权。响应 JSON 含 `data`（日志数组）、`total`（符合条件的总条数）、`limit`、`offset`；`limit` 最大 100，默认 20。
 
 ### 6. 用量统计
 ```

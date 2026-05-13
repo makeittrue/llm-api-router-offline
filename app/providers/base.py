@@ -63,6 +63,31 @@ def _sanitize_messages(messages: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _needs_mimo_reasoning_echo_pad(provider_model: str, base_url: str) -> bool:
+    """MiMo thinking 模式多轮对话要求回传 assistant 的 reasoning_content；部分客户端（如 Trae）在 tool 轮会漏该字段。"""
+    pm = (provider_model or "").lower()
+    bu = (base_url or "").lower()
+    if "xiaomimimo" in bu:
+        return True
+    if "mimo" in pm:
+        return True
+    return False
+
+
+def _pad_mimo_reasoning_in_messages(messages: list[dict[str, Any]]) -> None:
+    """对齐 Hermes / 官方说明：缺省或空字符串时用单个空格占位，避免上游 400。"""
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        rc = msg.get("reasoning_content")
+        rs = msg.get("reasoning")
+        if (rc is None or rc == "") and isinstance(rs, str) and rs != "":
+            msg["reasoning_content"] = rs
+            rc = msg["reasoning_content"]
+        if rc is None or rc == "":
+            msg["reasoning_content"] = " "
+
+
 def _strip_empty_tools(payload: dict[str, Any]) -> None:
     tools = payload.get("tools")
     if tools is None or tools == []:
@@ -145,6 +170,8 @@ class OpenAICompatibleProvider(BaseProvider):
             k: v for k, v in raw.items() if k in _OPENAI_CHAT_TOP_LEVEL_KEYS
         }
         payload["messages"] = _sanitize_messages(raw.get("messages", []))
+        if _needs_mimo_reasoning_echo_pad(provider_model, self.config.base_url):
+            _pad_mimo_reasoning_in_messages(payload["messages"])
         payload["model"] = provider_model
         # Trae / 新版 OpenAI SDK 会带 stream_options；多数自建兼容服务不认该字段 → 400
         payload.pop("stream_options", None)
