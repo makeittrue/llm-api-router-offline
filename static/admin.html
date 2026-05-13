@@ -492,27 +492,25 @@
 
         // 加载日志
         async function loadLogs() {
+            const tbody = document.getElementById("logs-table-body");
+            
+            // 发起请求前显示加载态
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="px-6 py-12 text-center text-gray-500">
+                        <i class="fa fa-circle-o-notch fa-spin text-2xl mb-2"></i>
+                        <p>加载中...</p>
+                    </td>
+                </tr>
+            `;
+            
             try {
                 const model = document.getElementById("log-model-filter").value;
                 const url = `/v1/logs?limit=10${model ? `&model=${encodeURIComponent(model)}` : ""}`;
                 const res = await authFetch(url);
                 const data = await res.json();
-                const tbody = document.getElementById("logs-table-body");
                 
-                // 显示加载态
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="6" class="px-6 py-12 text-center text-gray-500">
-                            <i class="fa fa-circle-o-notch fa-spin text-2xl mb-2"></i>
-                            <p>加载中...</p>
-                        </td>
-                    </tr>
-                `;
-                
-                // 等待100ms让加载动画显示
-                await new Promise(resolve => setTimeout(resolve, 100));
-                
-                // 清空加载态，渲染数据
+                // 收到响应后清空加载态，渲染数据
                 tbody.innerHTML = "";
                 
                 data.data.forEach(log => {
@@ -553,7 +551,7 @@
                                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                                     <div>
                                         <h4 class="font-bold text-sm mb-2 text-gray-700">请求消息</h4>
-                                        <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${JSON.stringify(typeof log.request_messages === 'string' ? JSON.parse(log.request_messages) : log.request_messages, null, 2)}</pre>
+                                        <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${(() => { try { const m = typeof log.request_messages === 'string' ? JSON.parse(log.request_messages) : log.request_messages; return JSON.stringify(m, null, 2); } catch (e) { return String(log.request_messages || '-'); } })()}</pre>
                                     </div>
                                     <div>
                                         <h4 class="font-bold text-sm mb-2 text-gray-700">排查信息</h4>
@@ -574,6 +572,14 @@
                 });
             } catch (e) {
                 console.error("加载日志失败", e);
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="px-6 py-12 text-center text-red-500">
+                            <i class="fa fa-exclamation-triangle text-2xl mb-2"></i>
+                            <p>加载失败，请重试</p>
+                        </td>
+                    </tr>
+                `;
             }
         }
 
