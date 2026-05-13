@@ -8,6 +8,9 @@ from typing import Any
 
 from app.models import ChatCompletionRequest, ChatCompletionResponse
 
+# SQLite / 内存：超大 messages 或不可序列化对象会导致 log_call 抛错，进而让流式响应末尾变成 HTTP 500
+_MAX_LOG_JSON_CHARS = 512_000
+
 
 def _usage_tokens_triple(u: Any) -> tuple[int, int, int]:
     if u is None:
@@ -338,11 +341,41 @@ class CallLogger:
             elif response is not None:
                 request_id = response.id
 
-            messages_json = json.dumps(
-                [m.model_dump(mode="python", exclude_none=True) for m in request.messages],
-                ensure_ascii=False,
-            )
-            log_meta_json = json.dumps(log_meta, ensure_ascii=False) if log_meta else None
+            try:
+                messages_json = json.dumps(
+                    [m.model_dump(mode="python", exclude_none=True) for m in request.messages],
+                    ensure_ascii=False,
+                )
+            except (TypeError, ValueError) as e:
+                messages_json = json.dumps(
+                    [{"role": "system", "content": f"[request_messages 无法序列化: {e}]"}],
+                    ensure_ascii=False,
+                )
+            if len(messages_json) > _MAX_LOG_JSON_CHARS:
+                messages_json = json.dumps(
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                f"[日志已截断] 原始 messages JSON 长度 {len(messages_json)}，"
+                                f"超过上限 {_MAX_LOG_JSON_CHARS}，未写入完整内容。"
+                            ),
+                        }
+                    ],
+                    ensure_ascii=False,
+                )
+
+            log_meta_json: str | None = None
+            if log_meta is not None:
+                try:
+                    log_meta_json = json.dumps(log_meta, ensure_ascii=False)
+                except (TypeError, ValueError) as e:
+                    log_meta_json = json.dumps({"_error": f"log_meta 序列化失败: {e}"}, ensure_ascii=False)
+                if len(log_meta_json) > _MAX_LOG_JSON_CHARS:
+                    log_meta_json = json.dumps(
+                        {"_truncated": True, "_original_chars": len(log_meta_json)},
+                        ensure_ascii=False,
+                    )
 
             conn.execute(
                 """
@@ -372,6 +405,8 @@ class CallLogger:
                 ),
             )
             conn.commit()
+        except Exception as e:
+            print(f"[WARN] log_call 写入失败（不影响 API 响应体）: {e!r}")
         finally:
             conn.close()
 
@@ -408,7 +443,7 @@ class CallLogger:
             conn.close()
 
     def get_usage_summary(
-        self, user_id: int | None = None, model: str | None = None
+        self, user_id: int | None = None, model: str | None = None, month: str | None = None
     ) -> list[dict[str, Any]]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -421,6 +456,9 @@ class CallLogger:
             if model:
                 conditions.append("model = ?")
                 params.append(model)
+            if month:
+                conditions.append("strftime('%Y-%m', created_at) = ?")
+                params.append(month)
             
             where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
             sql = f"""

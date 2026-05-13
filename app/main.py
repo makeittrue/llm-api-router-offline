@@ -350,11 +350,24 @@ async def chat_completions(
             return JSONResponse(status_code=e.status_code, content=e.body)
         except StopAsyncIteration:
 
-            async def empty_done():
+            async def empty_upstream_stream():
+                # 上游未写出任何字节时，仅 [DONE] 会让 Trae 等客户端判定「空内容」甚至后续异常
+                err = {
+                    "error": {
+                        "message": (
+                            "上游在建立流后未返回任何数据（空响应体）。"
+                            "若为 MiMo thinking 模式，请确认客户端能解析带 reasoning_content 的 SSE；"
+                            "或暂时关闭思考链 / 换非 thinking 模型。"
+                        ),
+                        "type": "api_error",
+                        "code": "empty_upstream_stream",
+                    }
+                }
+                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n".encode("utf-8")
                 yield b"data: [DONE]\n\n"
 
             return StreamingResponse(
-                empty_done(),
+                empty_upstream_stream(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -559,6 +572,11 @@ async def _stream_response(
                 "usage_raw": usage,
                 "assistant_text_chars": len(text),
                 "assistant_reasoning_chars": reason_len,
+                **(
+                    {"stream_only_reasoning_no_content": True}
+                    if (not text) and reason_len
+                    else {}
+                ),
             },
             "response_preview": preview,
         }
@@ -635,9 +653,10 @@ async def get_logs(
 @app.get("/v1/logs/summary")
 async def get_logs_summary(
     model: str | None = None,
+    month: str | None = None,
     current_user: dict = Depends(get_current_user)
 ):
-    summary = call_logger.get_usage_summary(user_id=current_user["id"], model=model)
+    summary = call_logger.get_usage_summary(user_id=current_user["id"], model=model, month=month)
     return {"data": summary}
 
 
