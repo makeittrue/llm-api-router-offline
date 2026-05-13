@@ -9,6 +9,64 @@ import httpx
 from app.config import ProviderConfig
 from app.models import ChatCompletionRequest
 
+# Trae / Cursor 等会通过 OpenAI SDK 附带大量非标准字段；Pydantic extra 会原样转发，
+# 自建 MiMo / vLLM 等严格校验时常见 400「Param Incorrect」。仅转发 OpenAI Chat 标准键。
+_OPENAI_CHAT_TOP_LEVEL_KEYS = frozenset(
+    {
+        "messages",
+        "temperature",
+        "top_p",
+        "n",
+        "stream",
+        "stop",
+        "max_tokens",
+        "max_completion_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "user",
+        "seed",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "response_format",
+        "modalities",
+    }
+)
+
+_OPENAI_MESSAGE_KEYS = frozenset(
+    {
+        "role",
+        "content",
+        "name",
+        "tool_calls",
+        "tool_call_id",
+        "function_call",
+    }
+)
+
+
+def _sanitize_messages(messages: Any) -> list[dict[str, Any]]:
+    if not isinstance(messages, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if isinstance(msg, dict):
+            out.append({k: v for k, v in msg.items() if k in _OPENAI_MESSAGE_KEYS})
+        else:
+            # ChatMessage 等模型实例
+            raw = msg.model_dump(mode="python", exclude_none=True)  # type: ignore[union-attr]
+            out.append({k: v for k, v in raw.items() if k in _OPENAI_MESSAGE_KEYS})
+    return out
+
+
+def _strip_empty_tools(payload: dict[str, Any]) -> None:
+    tools = payload.get("tools")
+    if tools is None or tools == []:
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        payload.pop("parallel_tool_calls", None)
+
 
 class UpstreamError(Exception):
     """上游 HTTP 失败时透出状态码与本 body（常为 OpenAI 风格的 `{\"error\":...}`）。"""
@@ -76,14 +134,24 @@ class OpenAICompatibleProvider(BaseProvider):
             "Content-Type": "application/json",
         }
 
-    def _build_payload(self, request: ChatCompletionRequest, provider_model: str) -> dict[str, Any]:
-        payload = request.model_dump(mode="python", exclude_none=True)
+    def _build_payload(
+        self, request: ChatCompletionRequest, provider_model: str, *, for_stream: bool
+    ) -> dict[str, Any]:
+        raw = request.model_dump(mode="python", exclude_none=True)
+        payload: dict[str, Any] = {
+            k: v for k, v in raw.items() if k in _OPENAI_CHAT_TOP_LEVEL_KEYS
+        }
+        payload["messages"] = _sanitize_messages(raw.get("messages", []))
         payload["model"] = provider_model
-        # Trae / 新版 OpenAI SDK 会带 stream_options；多数自建兼容服务（vLLM、部分 MiMo 网关）不认该字段 → 400 Param Incorrect
+        # Trae / 新版 OpenAI SDK 会带 stream_options；多数自建兼容服务不认该字段 → 400
         payload.pop("stream_options", None)
         # 同时传两个上限时，部分上游只接受其一
         if payload.get("max_tokens") is not None and payload.get("max_completion_tokens") is not None:
             payload.pop("max_completion_tokens", None)
+        _strip_empty_tools(payload)
+        # 流式仅支持 n=1；部分上游对显式 n 也不兼容，直接省略
+        if for_stream:
+            payload.pop("n", None)
         return payload
 
     async def chat_completion(
@@ -91,7 +159,7 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> dict[str, Any]:
         url = self._build_url("/chat/completions")
         headers = self._build_headers()
-        payload = self._build_payload(request, provider_model)
+        payload = self._build_payload(request, provider_model, for_stream=False)
         payload["stream"] = False
 
         print(f"[DEBUG] Sending to {url} payload:")
@@ -116,7 +184,7 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> AsyncIterator[bytes]:
         url = self._build_url("/chat/completions")
         headers = self._build_headers()
-        payload = self._build_payload(request, provider_model)
+        payload = self._build_payload(request, provider_model, for_stream=True)
         payload["stream"] = True
 
         print(f"[DEBUG] Sending stream to {url} payload:")
