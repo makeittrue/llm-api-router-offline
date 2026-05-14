@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.utils import verify_password, get_password_hash, create_access_token, verify_token
 
@@ -24,6 +24,7 @@ from app.router import Router
 app_config: AppConfig | None = None
 router: Router | None = None
 call_logger: CallLogger | None = None
+DEFAULT_ROUTE_MODEL = "default"
 
 
 @asynccontextmanager
@@ -257,11 +258,80 @@ class RouteUpdate(BaseModel):
     provider_api_type: str | None = None
 
 
+class DefaultRouteUpdate(BaseModel):
+    enabled: bool
+    models: list[str] = Field(default_factory=list)
+
+
+def _normalize_model_names(models: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for model in models or []:
+        if not isinstance(model, str):
+            continue
+        candidate = model.strip()
+        if not candidate or candidate in seen:
+            continue
+        normalized.append(candidate)
+        seen.add(candidate)
+    return normalized
+
+
+def _is_default_route_model(model: str | None) -> bool:
+    return isinstance(model, str) and model.strip().lower() == DEFAULT_ROUTE_MODEL
+
+
+def _assert_user_route_model_allowed(model: str) -> None:
+    if _is_default_route_model(model):
+        raise ValueError(
+            f"模型名 '{DEFAULT_ROUTE_MODEL}' 为保留名称，请在页面的默认降级配置区中管理。"
+        )
+
+
+def _can_resolve_model_for_user(user_id: int, model: str) -> bool:
+    if _is_default_route_model(model):
+        return False
+    if call_logger.get_user_route_by_model(user_id, model):
+        return True
+    try:
+        router.resolve(model)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_default_route_models(user_id: int, models: list[str]) -> list[str]:
+    normalized = _normalize_model_names(models)
+    invalid_models = [model for model in normalized if not _can_resolve_model_for_user(user_id, model)]
+    if invalid_models:
+        raise ValueError(f"以下模型不可用，无法加入 default 降级链：{', '.join(invalid_models)}")
+    return normalized
+
+
+def _get_user_default_route_config(user_id: int) -> dict[str, Any]:
+    config = call_logger.get_user_default_route(user_id)
+    return {
+        "enabled": bool(config.get("enabled")),
+        "models": _normalize_model_names(config.get("models") or []),
+        "updated_at": config.get("updated_at"),
+    }
+
+
+def _default_route_model_entry() -> dict[str, Any]:
+    return {
+        "id": DEFAULT_ROUTE_MODEL,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "my-llm",
+    }
+
+
 @app.get("/v1/models")
 async def list_models(current_user: dict = Depends(get_current_user)):
     # 合并全局模型和用户私有模型
     global_models = router.list_models()
     user_routes = call_logger.get_user_routes(current_user["id"])
+    default_route = _get_user_default_route_config(current_user["id"])
 
     all_models = [
         {"id": m.id, "object": m.object, "created": m.created, "owned_by": m.owned_by}
@@ -274,6 +344,8 @@ async def list_models(current_user: dict = Depends(get_current_user)):
             "owned_by": "my-llm",
         } for route in user_routes
     ]
+    if default_route["enabled"] and default_route["models"]:
+        all_models.append(_default_route_model_entry())
 
     seen = set()
     unique_models = []
@@ -326,14 +398,37 @@ def _resolve_model_target_for_user(user_id: int, model: str) -> ResolvedChatTarg
     return model, provider, provider_model, provider.config.name
 
 
+def _candidate_models_for_request(
+    user_id: int,
+    request: ChatCompletionRequest,
+) -> tuple[list[str], str | None]:
+    request_fallback_models = _normalize_model_names(request.default_models)
+    if not _is_default_route_model(request.model):
+        return [request.model, *request_fallback_models], None
+
+    default_route = _get_user_default_route_config(user_id)
+    if not default_route["enabled"]:
+        return [], (
+            "Model 'default' is disabled for this user. "
+            "Please enable and configure it in the admin page first."
+        )
+    if not default_route["models"]:
+        return [], (
+            "Model 'default' is not configured for this user. "
+            "Please set at least one fallback model in the admin page."
+        )
+    return [*default_route["models"], *request_fallback_models], None
+
+
 def _resolve_models_to_try(
     user_id: int,
     request: ChatCompletionRequest,
 ) -> tuple[list[ResolvedChatTarget], str | None]:
     models_to_try: list[ResolvedChatTarget] = []
     seen_models: set[str] = set()
-    primary_resolve_error: str | None = None
-    candidate_models = [request.model, *(request.default_models or [])]
+    candidate_models, primary_resolve_error = _candidate_models_for_request(user_id, request)
+    if not candidate_models:
+        return [], primary_resolve_error
 
     for idx, candidate_model in enumerate(candidate_models):
         if candidate_model in seen_models:
@@ -345,6 +440,10 @@ def _resolve_models_to_try(
             if idx == 0:
                 primary_resolve_error = str(e)
 
+    if not models_to_try and _is_default_route_model(request.model) and primary_resolve_error is None:
+        primary_resolve_error = (
+            "Model 'default' has no available fallback models in current route configuration."
+        )
     return models_to_try, primary_resolve_error
 
 
@@ -362,15 +461,17 @@ async def chat_completions(
 
     models_to_try, primary_resolve_error = _resolve_models_to_try(current_user["id"], request)
     if not models_to_try:
+        if _is_default_route_model(request.model) and primary_resolve_error:
+            message = primary_resolve_error
+        elif not request.default_models and primary_resolve_error:
+            message = primary_resolve_error
+        else:
+            message = f"Model '{request.model}' and all fallback models not found in route configuration."
         return JSONResponse(
             status_code=404,
             content={
                 "error": {
-                    "message": (
-                        primary_resolve_error
-                        if not request.default_models and primary_resolve_error
-                        else f"Model '{request.model}' and all fallback models not found in route configuration."
-                    ),
+                    "message": message,
                     "type": "invalid_request_error",
                     "param": "model",
                     "code": "model_not_found",
@@ -913,12 +1014,38 @@ async def get_user_routes(current_user: dict = Depends(get_current_user)):
     return {"routes": routes}
 
 
+@app.get("/v1/user/default-route")
+async def get_user_default_route(current_user: dict = Depends(get_current_user)):
+    return _get_user_default_route_config(current_user["id"])
+
+
+@app.put("/v1/user/default-route")
+async def update_user_default_route(
+    route: DefaultRouteUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    try:
+        models = _normalize_model_names(route.models)
+        if route.enabled and not models:
+            raise ValueError("启用 default 自动降级前，至少需要配置一个候选模型")
+        validated_models = _validate_default_route_models(current_user["id"], models) if models else []
+        saved = call_logger.upsert_user_default_route(
+            current_user["id"],
+            enabled=route.enabled,
+            models=validated_models,
+        )
+        return saved
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/v1/user/routes")
 async def create_user_route(
     route: RouteCreate,
     current_user: dict = Depends(get_current_user)
 ):
     try:
+        _assert_user_route_model_allowed(route.model)
         route_id = call_logger.create_user_route(
             user_id=current_user["id"],
             model=route.model,
@@ -944,7 +1071,9 @@ async def update_user_route(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        update_data = route.dict(exclude_unset=True)
+        update_data = route.model_dump(exclude_unset=True)
+        if "model" in update_data:
+            _assert_user_route_model_allowed(update_data["model"])
         success = call_logger.update_user_route(
             route_id=route_id,
             user_id=current_user["id"],

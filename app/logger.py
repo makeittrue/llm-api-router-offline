@@ -133,6 +133,16 @@ class CallLogger:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_user_routes_user_id ON user_routes(user_id)
         """)
+
+        # 用户 default 自动降级链配置
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_default_routes (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                models_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            )
+        """)
         
         conn.commit()
         conn.close()
@@ -304,6 +314,69 @@ class CallLogger:
             return cursor.rowcount > 0
         finally:
             conn.close()
+
+    def get_user_default_route(self, user_id: int) -> dict[str, Any]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT user_id, enabled, models_json, updated_at
+                FROM user_default_routes
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if not row:
+                return {"user_id": user_id, "enabled": False, "models": [], "updated_at": None}
+
+            try:
+                models = json.loads(row["models_json"] or "[]")
+            except json.JSONDecodeError:
+                models = []
+            if not isinstance(models, list):
+                models = []
+            normalized_models = [m.strip() for m in models if isinstance(m, str) and m.strip()]
+            return {
+                "user_id": row["user_id"],
+                "enabled": bool(row["enabled"]),
+                "models": normalized_models,
+                "updated_at": row["updated_at"],
+            }
+        finally:
+            conn.close()
+
+    def upsert_user_default_route(
+        self,
+        user_id: int,
+        *,
+        enabled: bool,
+        models: list[str],
+    ) -> dict[str, Any]:
+        normalized_models = [m.strip() for m in models if isinstance(m, str) and m.strip()]
+        updated_at = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO user_default_routes (user_id, enabled, models_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    models_json = excluded.models_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    1 if enabled else 0,
+                    json.dumps(normalized_models, ensure_ascii=False),
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return self.get_user_default_route(user_id)
 
     def log_call(
         self,

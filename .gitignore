@@ -166,3 +166,5 @@ logs/
 config.yaml
 *.sqlite3
 test.md
+test.json
+tests/
