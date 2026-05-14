@@ -88,6 +88,18 @@ def _pad_mimo_reasoning_in_messages(messages: list[dict[str, Any]]) -> None:
             msg["reasoning_content"] = " "
 
 
+def _needs_reasoning_echo_retry(body: dict[str, Any]) -> bool:
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return False
+    merged = " ".join(
+        str(v).lower()
+        for v in (err.get("message"), err.get("param"), err.get("code"), err.get("type"))
+        if v is not None
+    )
+    return "reasoning_content" in merged and "passed back" in merged
+
+
 def _strip_empty_tools(payload: dict[str, Any]) -> None:
     tools = payload.get("tools")
     if tools is None or tools == []:
@@ -163,14 +175,19 @@ class OpenAICompatibleProvider(BaseProvider):
         }
 
     def _build_payload(
-        self, request: ChatCompletionRequest, provider_model: str, *, for_stream: bool
+        self,
+        request: ChatCompletionRequest,
+        provider_model: str,
+        *,
+        for_stream: bool,
+        force_reasoning_echo_pad: bool = False,
     ) -> dict[str, Any]:
         raw = request.model_dump(mode="python", exclude_none=True)
         payload: dict[str, Any] = {
             k: v for k, v in raw.items() if k in _OPENAI_CHAT_TOP_LEVEL_KEYS
         }
         payload["messages"] = _sanitize_messages(raw.get("messages", []))
-        if _needs_mimo_reasoning_echo_pad(provider_model, self.config.base_url):
+        if force_reasoning_echo_pad or _needs_mimo_reasoning_echo_pad(provider_model, self.config.base_url):
             _pad_mimo_reasoning_in_messages(payload["messages"])
         payload["model"] = provider_model
         # Trae / 新版 OpenAI SDK 会带 stream_options；多数自建兼容服务不认该字段 → 400
@@ -189,20 +206,33 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> dict[str, Any]:
         url = self._build_url("/chat/completions")
         headers = self._build_headers()
-        payload = self._build_payload(request, provider_model, for_stream=False)
-        payload["stream"] = False
-
-        print(f"[DEBUG] Sending to {url} payload:")
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                print(f"[DEBUG] Response status: {resp.status_code}")
-                if resp.status_code >= 400:
+                force_reasoning_echo_pad = False
+                for attempt in range(2):
+                    payload = self._build_payload(
+                        request,
+                        provider_model,
+                        for_stream=False,
+                        force_reasoning_echo_pad=force_reasoning_echo_pad,
+                    )
+                    payload["stream"] = False
+
+                    print(f"[DEBUG] Sending to {url} payload:")
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+                    resp = await client.post(url, headers=headers, json=payload)
+                    print(f"[DEBUG] Response status: {resp.status_code}")
+                    if resp.status_code < 400:
+                        return resp.json()
+
                     print(f"[DEBUG] Error response content: {resp.text}")
+                    retryable = attempt == 0 and _needs_reasoning_echo_retry(UpstreamError.from_httpx_response(resp).body)
+                    if retryable:
+                        print("[DEBUG] Retrying with assistant reasoning_content padding")
+                        force_reasoning_echo_pad = True
+                        continue
                     raise UpstreamError.from_httpx_response(resp)
-                return resp.json()
         except UpstreamError:
             raise
         except Exception as e:
@@ -214,25 +244,39 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> AsyncIterator[bytes]:
         url = self._build_url("/chat/completions")
         headers = self._build_headers()
-        payload = self._build_payload(request, provider_model, for_stream=True)
-        payload["stream"] = True
-
-        print(f"[DEBUG] Sending stream to {url} payload:")
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
-                async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                    print(f"[DEBUG] Stream response status: {resp.status_code}")
-                    if resp.status_code >= 400:
-                        buf = await resp.aread()
-                        text = buf.decode("utf-8", errors="replace")
-                        print(f"[DEBUG] Stream error response content: {text}")
-                        raise UpstreamError.from_text(resp.status_code, text)
+                force_reasoning_echo_pad = False
+                for attempt in range(2):
+                    payload = self._build_payload(
+                        request,
+                        provider_model,
+                        for_stream=True,
+                        force_reasoning_echo_pad=force_reasoning_echo_pad,
+                    )
+                    payload["stream"] = True
 
-                    # 必须用 aiter_bytes：aiter_raw 为未解压的 gzip/deflate，直接转发会导致客户端 SSE 解码失败
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
+                    print(f"[DEBUG] Sending stream to {url} payload:")
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+                    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        print(f"[DEBUG] Stream response status: {resp.status_code}")
+                        if resp.status_code >= 400:
+                            buf = await resp.aread()
+                            text = buf.decode("utf-8", errors="replace")
+                            print(f"[DEBUG] Stream error response content: {text}")
+                            err = UpstreamError.from_text(resp.status_code, text)
+                            retryable = attempt == 0 and _needs_reasoning_echo_retry(err.body)
+                            if retryable:
+                                print("[DEBUG] Retrying stream with assistant reasoning_content padding")
+                                force_reasoning_echo_pad = True
+                                continue
+                            raise err
+
+                        # 必须用 aiter_bytes：aiter_raw 为未解压的 gzip/deflate，直接转发会导致客户端 SSE 解码失败
+                        async for chunk in resp.aiter_bytes():
+                            yield chunk
+                        return
         except UpstreamError:
             raise
 
