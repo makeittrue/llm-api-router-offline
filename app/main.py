@@ -18,7 +18,7 @@ from app.utils import verify_password, get_password_hash, create_access_token, v
 from app.config import AppConfig, load_config, ProviderConfig
 from app.logger import CallLogger, build_request_log_meta
 from app.models import ChatCompletionRequest, ModelListResponse
-from app.providers.base import UpstreamError, create_provider
+from app.providers.base import BaseProvider, UpstreamError, create_provider
 from app.router import Router
 
 app_config: AppConfig | None = None
@@ -307,22 +307,11 @@ def _sse_error_stream(error_body: dict[str, Any]) -> AsyncIterator[bytes]:
     return gen()
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(
-    request: ChatCompletionRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    start_time = time.time()
-    provider_name = None
-    provider_model = None
-    provider = None
+ResolvedChatTarget = tuple[str, BaseProvider, str, str]
 
-    print(
-        "[DEBUG] chat/completions request:",
-        json.dumps(request.model_dump(mode="python", exclude_none=True), indent=2, ensure_ascii=False),
-    )
 
-    user_route = call_logger.get_user_route_by_model(current_user["id"], request.model)
+def _resolve_model_target_for_user(user_id: int, model: str) -> ResolvedChatTarget:
+    user_route = call_logger.get_user_route_by_model(user_id, model)
     if user_route:
         provider_config = ProviderConfig(
             name=user_route["provider_name"],
@@ -331,190 +320,256 @@ async def chat_completions(
             api_type=user_route["provider_api_type"],
         )
         provider = create_provider(provider_config)
-        provider_model = user_route["provider_model"]
-        provider_name = user_route["provider_name"]
-    else:
+        return model, provider, user_route["provider_model"], user_route["provider_name"]
+
+    provider, provider_model = router.resolve(model)
+    return model, provider, provider_model, provider.config.name
+
+
+def _resolve_models_to_try(
+    user_id: int,
+    request: ChatCompletionRequest,
+) -> tuple[list[ResolvedChatTarget], str | None]:
+    models_to_try: list[ResolvedChatTarget] = []
+    seen_models: set[str] = set()
+    primary_resolve_error: str | None = None
+    candidate_models = [request.model, *(request.default_models or [])]
+
+    for idx, candidate_model in enumerate(candidate_models):
+        if candidate_model in seen_models:
+            continue
+        seen_models.add(candidate_model)
         try:
-            provider, provider_model = router.resolve(request.model)
-            provider_name = provider.config.name
+            models_to_try.append(_resolve_model_target_for_user(user_id, candidate_model))
         except ValueError as e:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "message": str(e),
-                        "type": "invalid_request_error",
-                        "param": "model",
-                        "code": "model_not_found",
-                    }
-                },
-            )
+            if idx == 0:
+                primary_resolve_error = str(e)
+
+    return models_to_try, primary_resolve_error
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    request: ChatCompletionRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    start_time = time.time()
+
+    print(
+        "[DEBUG] chat/completions request:",
+        json.dumps(request.model_dump(mode="python", exclude_none=True), indent=2, ensure_ascii=False),
+    )
+
+    models_to_try, primary_resolve_error = _resolve_models_to_try(current_user["id"], request)
+    if not models_to_try:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": (
+                        primary_resolve_error
+                        if not request.default_models and primary_resolve_error
+                        else f"Model '{request.model}' and all fallback models not found in route configuration."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "code": "model_not_found",
+                }
+            },
+        )
 
     if request.stream:
-        raw = provider.chat_completion_stream(request, provider_model)
-        ait = raw.__aiter__()
+        last_error = None
+        for response_model, try_provider, try_provider_model, try_provider_name in models_to_try:
+            try:
+                raw = try_provider.chat_completion_stream(request, try_provider_model)
+                ait = raw.__aiter__()
+                try:
+                    first = await ait.__anext__()
+                except UpstreamError as e:
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    call_logger.log_call(
+                        request=request,
+                        provider_name=try_provider_name,
+                        provider_model=try_provider_model,
+                        duration_ms=duration_ms,
+                        status="error",
+                        error_message=str(e),
+                        user_id=current_user["id"],
+                        log_meta={
+                            "request": build_request_log_meta(request),
+                            "error_stage": "stream_open",
+                            "upstream_status_code": e.status_code,
+                            "upstream_error_body": e.body,
+                        },
+                    )
+                    last_error = e
+                    continue
+                except StopAsyncIteration:
+                    err = {
+                        "error": {
+                            "message": (
+                                "上游在建立流后未返回任何数据（空响应体）。"
+                                "若为 MiMo thinking 模式，请确认客户端能解析带 reasoning_content 的 SSE；"
+                                "或暂时关闭思考链 / 换非 thinking 模型。"
+                            ),
+                            "type": "api_error",
+                            "code": "empty_upstream_stream",
+                        }
+                    }
+                    last_error = Exception(err["error"]["message"])
+                    continue
+                except Exception as e:
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    call_logger.log_call(
+                        request=request,
+                        provider_name=try_provider_name,
+                        provider_model=try_provider_model,
+                        duration_ms=duration_ms,
+                        status="error",
+                        error_message=str(e),
+                        user_id=current_user["id"],
+                        log_meta={"request": build_request_log_meta(request), "error_stage": "stream_open"},
+                    )
+                    last_error = e
+                    continue
+
+                async def merged_bytes():
+                    yield first
+                    async for chunk in ait:
+                        yield chunk
+
+                return StreamingResponse(
+                    _stream_response(
+                        request,
+                        sse_chunks=merged_bytes(),
+                        response_model=response_model,
+                        provider_model=try_provider_model,
+                        provider_name=try_provider_name,
+                        start_time=start_time,
+                        user_id=current_user["id"],
+                    ),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            except Exception as e:
+                last_error = e
+                continue
+
+        if last_error:
+            if isinstance(last_error, UpstreamError):
+                return StreamingResponse(
+                    _sse_error_stream(last_error.body),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            else:
+                return StreamingResponse(
+                    _sse_error_stream(
+                        {
+                            "error": {
+                                "message": str(last_error),
+                                "type": "api_error",
+                                "code": "bad_gateway",
+                            }
+                        }
+                    ),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+
+    last_error = None
+    for _, try_provider, try_provider_model, try_provider_name in models_to_try:
         try:
-            first = await ait.__anext__()
+            data = await try_provider.chat_completion(request, try_provider_model)
+            data["model"] = request.model
+            duration_ms = int((time.time() - start_time) * 1000)
+            finish_reason, assistant_text = _preview_from_completion_body(data)
+            log_meta = {
+                "request": build_request_log_meta(request),
+                "response": {
+                    "finish_reason": finish_reason,
+                    "assistant_chars": len(assistant_text or ""),
+                    "preview": _log_preview_text(assistant_text or ""),
+                },
+            }
+            call_logger.log_call(
+                request=request,
+                response_body=data,
+                provider_name=try_provider_name,
+                provider_model=try_provider_model,
+                duration_ms=duration_ms,
+                status="success",
+                user_id=current_user["id"],
+                log_meta=log_meta,
+            )
+            return JSONResponse(content=data, media_type="application/json")
         except UpstreamError as e:
             duration_ms = int((time.time() - start_time) * 1000)
             call_logger.log_call(
                 request=request,
-                provider_name=provider_name,
-                provider_model=provider_model,
+                provider_name=try_provider_name,
+                provider_model=try_provider_model,
                 duration_ms=duration_ms,
                 status="error",
                 error_message=str(e),
                 user_id=current_user["id"],
-                log_meta={
-                    "request": build_request_log_meta(request),
-                    "error_stage": "stream_open",
-                    "upstream_status_code": e.status_code,
-                    "upstream_error_body": e.body,
-                },
+                log_meta={"request": build_request_log_meta(request), "error_stage": "chat_completion"},
             )
-            return StreamingResponse(
-                _sse_error_stream(e.body),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-        except StopAsyncIteration:
-            # 上游未写出任何字节时，仅 [DONE] 会让 Trae 等客户端判定「空内容」甚至后续异常
-            err = {
-                "error": {
-                    "message": (
-                        "上游在建立流后未返回任何数据（空响应体）。"
-                        "若为 MiMo thinking 模式，请确认客户端能解析带 reasoning_content 的 SSE；"
-                        "或暂时关闭思考链 / 换非 thinking 模型。"
-                    ),
-                    "type": "api_error",
-                    "code": "empty_upstream_stream",
-                }
-            }
-
-            return StreamingResponse(
-                _sse_error_stream(err),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
+            last_error = e
+            continue
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             call_logger.log_call(
                 request=request,
-                provider_name=provider_name,
-                provider_model=provider_model,
+                provider_name=try_provider_name,
+                provider_model=try_provider_model,
                 duration_ms=duration_ms,
                 status="error",
                 error_message=str(e),
                 user_id=current_user["id"],
-                log_meta={"request": build_request_log_meta(request), "error_stage": "stream_open"},
+                log_meta={"request": build_request_log_meta(request), "error_stage": "chat_completion"},
             )
-            return StreamingResponse(
-                _sse_error_stream(
-                    {
-                        "error": {
-                            "message": str(e),
-                            "type": "api_error",
-                            "code": "bad_gateway",
-                        }
+            last_error = e
+            continue
+
+    if last_error:
+        if isinstance(last_error, UpstreamError):
+            return JSONResponse(status_code=last_error.status_code, content=last_error.body)
+        else:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "message": str(last_error),
+                        "type": "api_error",
+                        "code": "bad_gateway",
                     }
-                ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
                 },
             )
 
-        async def merged_bytes():
-            yield first
-            async for chunk in ait:
-                yield chunk
-
-        return StreamingResponse(
-            _stream_response(
-                request,
-                sse_chunks=merged_bytes(),
-                provider_model=provider_model,
-                provider_name=provider_name,
-                start_time=start_time,
-                user_id=current_user["id"],
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    try:
-        data = await provider.chat_completion(request, provider_model)
-        data["model"] = request.model
-        duration_ms = int((time.time() - start_time) * 1000)
-        finish_reason, assistant_text = _preview_from_completion_body(data)
-        log_meta = {
-            "request": build_request_log_meta(request),
-            "response": {
-                "finish_reason": finish_reason,
-                "assistant_chars": len(assistant_text or ""),
-                "preview": _log_preview_text(assistant_text or ""),
-            },
-        }
-        call_logger.log_call(
-            request=request,
-            response_body=data,
-            provider_name=provider_name,
-            provider_model=provider_model,
-            duration_ms=duration_ms,
-            status="success",
-            user_id=current_user["id"],
-            log_meta=log_meta,
-        )
-        return JSONResponse(content=data, media_type="application/json")
-    except UpstreamError as e:
-        duration_ms = int((time.time() - start_time) * 1000)
-        call_logger.log_call(
-            request=request,
-            provider_name=provider_name,
-            provider_model=provider_model,
-            duration_ms=duration_ms,
-            status="error",
-            error_message=str(e),
-            user_id=current_user["id"],
-            log_meta={"request": build_request_log_meta(request), "error_stage": "chat_completion"},
-        )
-        return JSONResponse(status_code=e.status_code, content=e.body)
-    except Exception as e:
-        duration_ms = int((time.time() - start_time) * 1000)
-        call_logger.log_call(
-            request=request,
-            provider_name=provider_name,
-            provider_model=provider_model,
-            duration_ms=duration_ms,
-            status="error",
-            error_message=str(e),
-            user_id=current_user["id"],
-            log_meta={"request": build_request_log_meta(request), "error_stage": "chat_completion"},
-        )
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": {
-                    "message": str(e),
-                    "type": "api_error",
-                    "code": "bad_gateway",
-                }
-            },
-        )
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": {
+                "message": "All models failed",
+                "type": "api_error",
+                "code": "bad_gateway",
+            }
+        },
+    )
 
 
 def _log_preview_text(text: str, max_total: int = 4000) -> str:
@@ -537,6 +592,8 @@ def _accumulate_stream_sse_line(line: str, acc: dict) -> None:
         acc["sse_json_errors"] = acc.get("sse_json_errors", 0) + 1
         return
     acc["sse_data_events"] = acc.get("sse_data_events", 0) + 1
+    if isinstance(data.get("model"), str) and data["model"]:
+        acc.setdefault("response_model", data["model"])
     if data.get("id"):
         acc.setdefault("upstream_response_id", data["id"])
     u = data.get("usage")
@@ -600,6 +657,7 @@ async def _stream_response(
     request: ChatCompletionRequest,
     *,
     sse_chunks: AsyncIterator[bytes],
+    response_model: str,
     provider_model: str,
     provider_name: str,
     start_time: float,
@@ -639,14 +697,14 @@ async def _stream_response(
         ):
             acc["synthetic_empty_content_chunk"] = True
             yield _build_sse_chunk_bytes(
-                model=request.model,
+                model=acc.get("response_model") or response_model,
                 response_id=acc.get("upstream_response_id"),
                 delta={"role": "assistant", "content": ""},
             )
         if not acc.get("saw_done") and not acc.get("saw_finish_reason"):
             acc["synthetic_finish_chunk"] = True
             yield _build_sse_chunk_bytes(
-                model=request.model,
+                model=acc.get("response_model") or response_model,
                 response_id=acc.get("upstream_response_id"),
                 delta={},
                 finish_reason=acc.get("finish_reason") or "stop",

@@ -46,6 +46,7 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: bool | None = None
     response_format: Any | None = None
     modalities: Any | None = None
+    default_models: list[str] | None = None
 
 
 class CompletionUsage(BaseModel):
