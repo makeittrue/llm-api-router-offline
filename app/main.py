@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -528,6 +529,7 @@ def _accumulate_stream_sse_line(line: str, acc: dict) -> None:
         return
     body = line[6:].strip()
     if body == "[DONE]":
+        acc["saw_done"] = True
         return
     try:
         data = json.loads(body)
@@ -547,13 +549,42 @@ def _accumulate_stream_sse_line(line: str, acc: dict) -> None:
     for choice in data.get("choices") or []:
         if choice.get("finish_reason"):
             acc["finish_reason"] = choice["finish_reason"]
+            acc["saw_finish_reason"] = True
         delta = choice.get("delta") or {}
+        if isinstance(delta.get("role"), str):
+            acc["saw_role"] = True
+        if "content" in delta:
+            acc["saw_content_field"] = True
         c = delta.get("content")
         if isinstance(c, str) and c:
             acc.setdefault("_text_parts", []).append(c)
         r = delta.get("reasoning_content")
         if isinstance(r, str) and r:
             acc.setdefault("_reason_parts", []).append(r)
+            acc["saw_reasoning_content"] = True
+
+
+def _build_sse_chunk_bytes(
+    *,
+    model: str,
+    response_id: str | None,
+    delta: dict[str, Any],
+    finish_reason: str | None = None,
+) -> bytes:
+    payload = {
+        "id": response_id or f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
 def _stream_log_snapshot(acc: dict) -> tuple[str, int, str]:
@@ -575,16 +606,54 @@ async def _stream_response(
     user_id: int,
 ):
     acc: dict = {"sse_data_events": 0, "sse_json_errors": 0}
+    parser_buf = ""
     try:
         async for chunk in sse_chunks:
             # 分块边界可能截断多字节 UTF-8；日志解析用替换策略，避免整路流因解码异常中断
             chunk_str = chunk.decode("utf-8", errors="replace")
-            for line in chunk_str.split("\n"):
+            parser_buf += chunk_str
+            lines = parser_buf.splitlines(keepends=True)
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                parser_buf = lines.pop()
+            else:
+                parser_buf = ""
+            for line in lines:
                 try:
-                    _accumulate_stream_sse_line(line, acc)
+                    _accumulate_stream_sse_line(line.rstrip("\r\n"), acc)
                 except Exception:
                     acc["sse_parse_exceptions"] = acc.get("sse_parse_exceptions", 0) + 1
             yield chunk
+
+        if parser_buf:
+            try:
+                _accumulate_stream_sse_line(parser_buf.rstrip("\r\n"), acc)
+            except Exception:
+                acc["sse_parse_exceptions"] = acc.get("sse_parse_exceptions", 0) + 1
+
+        # 某些客户端在只有 reasoning_content、缺少 content 或缺少 [DONE] 时会一直停留在“思考中”。
+        # 只有在上游尚未给出 [DONE] 时，才能安全补发兼容收尾块。
+        if (
+            not acc.get("saw_done")
+            and acc.get("saw_reasoning_content")
+            and not acc.get("saw_content_field")
+        ):
+            acc["synthetic_empty_content_chunk"] = True
+            yield _build_sse_chunk_bytes(
+                model=request.model,
+                response_id=acc.get("upstream_response_id"),
+                delta={"role": "assistant", "content": ""},
+            )
+        if not acc.get("saw_done") and not acc.get("saw_finish_reason"):
+            acc["synthetic_finish_chunk"] = True
+            yield _build_sse_chunk_bytes(
+                model=request.model,
+                response_id=acc.get("upstream_response_id"),
+                delta={},
+                finish_reason=acc.get("finish_reason") or "stop",
+            )
+        if not acc.get("saw_done"):
+            acc["synthetic_done"] = True
+            yield b"data: [DONE]\n\n"
 
         duration_ms = int((time.time() - start_time) * 1000)
         text, reason_len, preview = _stream_log_snapshot(acc)
@@ -612,6 +681,17 @@ async def _stream_response(
                     if (not text) and reason_len
                     else {}
                 ),
+                **(
+                    {"synthetic_empty_content_chunk": True}
+                    if acc.get("synthetic_empty_content_chunk")
+                    else {}
+                ),
+                **(
+                    {"synthetic_finish_chunk": True}
+                    if acc.get("synthetic_finish_chunk")
+                    else {}
+                ),
+                **({"synthetic_done": True} if acc.get("synthetic_done") else {}),
             },
             "response_preview": preview,
         }
