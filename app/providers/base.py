@@ -88,6 +88,60 @@ def _pad_mimo_reasoning_in_messages(messages: list[dict[str, Any]]) -> None:
             msg["reasoning_content"] = " "
 
 
+def _debug_message_summary(messages: list[dict[str, Any]], *, tail: int = 8) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    start = max(0, len(messages) - tail)
+    for idx, msg in enumerate(messages[start:], start=start):
+        content = msg.get("content")
+        if isinstance(content, str):
+            content_kind = "text"
+            content_chars = len(content)
+            preview = content[:120] + ("..." if len(content) > 120 else "")
+        elif isinstance(content, list):
+            content_kind = "parts"
+            content_chars = len(json.dumps(content, ensure_ascii=False))
+            preview = json.dumps(content[:2], ensure_ascii=False)[:120]
+        elif content is None:
+            content_kind = "none"
+            content_chars = 0
+            preview = None
+        else:
+            content_kind = type(content).__name__
+            rendered = str(content)
+            content_chars = len(rendered)
+            preview = rendered[:120] + ("..." if len(rendered) > 120 else "")
+
+        tool_calls = msg.get("tool_calls")
+        summary.append(
+            {
+                "idx": idx,
+                "role": msg.get("role"),
+                "content_kind": content_kind,
+                "content_chars": content_chars,
+                "has_reasoning_content": isinstance(msg.get("reasoning_content"), str),
+                "reasoning_chars": len(msg.get("reasoning_content") or ""),
+                "has_reasoning": isinstance(msg.get("reasoning"), str),
+                "reasoning_alias_chars": len(msg.get("reasoning") or ""),
+                "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+                "tool_call_id": msg.get("tool_call_id"),
+                "preview": preview,
+            }
+        )
+    return summary
+
+
+def _debug_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    messages = payload.get("messages")
+    return {
+        "model": payload.get("model"),
+        "stream": payload.get("stream"),
+        "message_count": len(messages) if isinstance(messages, list) else 0,
+        "tools_count": len(payload.get("tools")) if isinstance(payload.get("tools"), list) else 0,
+        "has_tool_choice": payload.get("tool_choice") is not None,
+        "tail_messages": _debug_message_summary(messages or []),
+    }
+
+
 def _needs_reasoning_echo_retry(body: dict[str, Any]) -> bool:
     err = body.get("error")
     if not isinstance(err, dict):
@@ -220,6 +274,8 @@ class OpenAICompatibleProvider(BaseProvider):
 
                     print(f"[DEBUG] Sending to {url} payload:")
                     print(json.dumps(payload, indent=2, ensure_ascii=False))
+                    print("[DEBUG] Payload summary:")
+                    print(json.dumps(_debug_payload_summary(payload), indent=2, ensure_ascii=False))
 
                     resp = await client.post(url, headers=headers, json=payload)
                     print(f"[DEBUG] Response status: {resp.status_code}")
@@ -227,12 +283,13 @@ class OpenAICompatibleProvider(BaseProvider):
                         return resp.json()
 
                     print(f"[DEBUG] Error response content: {resp.text}")
-                    retryable = attempt == 0 and _needs_reasoning_echo_retry(UpstreamError.from_httpx_response(resp).body)
+                    err = UpstreamError.from_httpx_response(resp)
+                    retryable = attempt == 0 and _needs_reasoning_echo_retry(err.body)
                     if retryable:
                         print("[DEBUG] Retrying with assistant reasoning_content padding")
                         force_reasoning_echo_pad = True
                         continue
-                    raise UpstreamError.from_httpx_response(resp)
+                    raise err
         except UpstreamError:
             raise
         except Exception as e:
@@ -258,6 +315,8 @@ class OpenAICompatibleProvider(BaseProvider):
 
                     print(f"[DEBUG] Sending stream to {url} payload:")
                     print(json.dumps(payload, indent=2, ensure_ascii=False))
+                    print("[DEBUG] Stream payload summary:")
+                    print(json.dumps(_debug_payload_summary(payload), indent=2, ensure_ascii=False))
 
                     async with client.stream("POST", url, headers=headers, json=payload) as resp:
                         print(f"[DEBUG] Stream response status: {resp.status_code}")

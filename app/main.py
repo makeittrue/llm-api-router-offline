@@ -298,6 +298,14 @@ def _preview_from_completion_body(data: dict[str, Any]) -> tuple[str | None, str
     return fr, None
 
 
+def _sse_error_stream(error_body: dict[str, Any]) -> AsyncIterator[bytes]:
+    async def gen():
+        yield f"data: {json.dumps(error_body, ensure_ascii=False)}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
+
+    return gen()
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -347,27 +355,47 @@ async def chat_completions(
         try:
             first = await ait.__anext__()
         except UpstreamError as e:
-            return JSONResponse(status_code=e.status_code, content=e.body)
+            duration_ms = int((time.time() - start_time) * 1000)
+            call_logger.log_call(
+                request=request,
+                provider_name=provider_name,
+                provider_model=provider_model,
+                duration_ms=duration_ms,
+                status="error",
+                error_message=str(e),
+                user_id=current_user["id"],
+                log_meta={
+                    "request": build_request_log_meta(request),
+                    "error_stage": "stream_open",
+                    "upstream_status_code": e.status_code,
+                    "upstream_error_body": e.body,
+                },
+            )
+            return StreamingResponse(
+                _sse_error_stream(e.body),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         except StopAsyncIteration:
-
-            async def empty_upstream_stream():
-                # 上游未写出任何字节时，仅 [DONE] 会让 Trae 等客户端判定「空内容」甚至后续异常
-                err = {
-                    "error": {
-                        "message": (
-                            "上游在建立流后未返回任何数据（空响应体）。"
-                            "若为 MiMo thinking 模式，请确认客户端能解析带 reasoning_content 的 SSE；"
-                            "或暂时关闭思考链 / 换非 thinking 模型。"
-                        ),
-                        "type": "api_error",
-                        "code": "empty_upstream_stream",
-                    }
+            # 上游未写出任何字节时，仅 [DONE] 会让 Trae 等客户端判定「空内容」甚至后续异常
+            err = {
+                "error": {
+                    "message": (
+                        "上游在建立流后未返回任何数据（空响应体）。"
+                        "若为 MiMo thinking 模式，请确认客户端能解析带 reasoning_content 的 SSE；"
+                        "或暂时关闭思考链 / 换非 thinking 模型。"
+                    ),
+                    "type": "api_error",
+                    "code": "empty_upstream_stream",
                 }
-                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n".encode("utf-8")
-                yield b"data: [DONE]\n\n"
+            }
 
             return StreamingResponse(
-                empty_upstream_stream(),
+                _sse_error_stream(err),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -387,14 +415,21 @@ async def chat_completions(
                 user_id=current_user["id"],
                 log_meta={"request": build_request_log_meta(request), "error_stage": "stream_open"},
             )
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "error": {
-                        "message": str(e),
-                        "type": "api_error",
-                        "code": "bad_gateway",
+            return StreamingResponse(
+                _sse_error_stream(
+                    {
+                        "error": {
+                            "message": str(e),
+                            "type": "api_error",
+                            "code": "bad_gateway",
+                        }
                     }
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
                 },
             )
 
