@@ -48,6 +48,165 @@ _OPENAI_MESSAGE_KEYS = frozenset(
     }
 )
 
+_OPENAI_CONTENT_PART_KEYS = frozenset(
+    {
+        "type",
+        "text",
+        "image_url",
+        "input_audio",
+        "file",
+        "refusal",
+    }
+)
+
+_OPENAI_TOOL_FUNCTION_KEYS = frozenset({"name", "description", "parameters", "strict"})
+_OPENAI_TOOL_CHOICE_KEYS = frozenset({"type", "function"})
+_OPENAI_RESPONSE_FORMAT_JSON_SCHEMA_KEYS = frozenset(
+    {"name", "description", "schema", "strict"}
+)
+
+
+def _normalize_json_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
+
+
+def _sanitize_content_part(part: Any) -> dict[str, Any] | None:
+    if isinstance(part, str):
+        return {"type": "text", "text": part}
+    if not isinstance(part, dict):
+        return None
+
+    if isinstance(part.get("text"), str) and part.get("type") in {None, "text"}:
+        return {"type": "text", "text": part["text"]}
+    if part.get("type") == "image_url" and part.get("image_url") is not None:
+        return {"type": "image_url", "image_url": part["image_url"]}
+    if part.get("type") == "input_audio" and part.get("input_audio") is not None:
+        return {"type": "input_audio", "input_audio": part["input_audio"]}
+    if part.get("type") == "file" and part.get("file") is not None:
+        return {"type": "file", "file": part["file"]}
+    if part.get("type") == "refusal" and part.get("refusal") is not None:
+        return {"type": "refusal", "refusal": part["refusal"]}
+
+    cleaned = {k: v for k, v in part.items() if k in _OPENAI_CONTENT_PART_KEYS}
+    if cleaned.get("type") is None and isinstance(cleaned.get("text"), str):
+        cleaned["type"] = "text"
+    return cleaned or None
+
+
+def _sanitize_content(content: Any) -> Any:
+    if content is None or isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        part = _sanitize_content_part(content)
+        return [part] if part is not None else []
+    if not isinstance(content, list):
+        return content
+
+    out: list[dict[str, Any]] = []
+    for part in content:
+        cleaned = _sanitize_content_part(part)
+        if cleaned is not None:
+            out.append(cleaned)
+    return out
+
+
+def _sanitize_function_call(function_call: Any) -> dict[str, Any] | None:
+    if not isinstance(function_call, dict):
+        return None
+    name = function_call.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+
+    cleaned: dict[str, Any] = {"name": name}
+    if "arguments" in function_call:
+        cleaned["arguments"] = _normalize_json_string(function_call.get("arguments"))
+    return cleaned
+
+
+def _sanitize_tool_calls(tool_calls: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(tool_calls, list):
+        return None
+
+    out: list[dict[str, Any]] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = _sanitize_function_call(call.get("function"))
+        if function is None:
+            continue
+        cleaned: dict[str, Any] = {"type": "function", "function": function}
+        if isinstance(call.get("id"), str) and call["id"]:
+            cleaned["id"] = call["id"]
+        out.append(cleaned)
+    return out
+
+
+def _sanitize_tools(tools: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(tools, list):
+        return None
+
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        cleaned_function = {
+            k: v for k, v in function.items() if k in _OPENAI_TOOL_FUNCTION_KEYS
+        }
+        cleaned_function["name"] = name
+        out.append({"type": "function", "function": cleaned_function})
+    return out
+
+
+def _sanitize_tool_choice(tool_choice: Any) -> str | dict[str, Any] | None:
+    if isinstance(tool_choice, str):
+        return tool_choice
+    if not isinstance(tool_choice, dict):
+        return None
+
+    cleaned = {k: v for k, v in tool_choice.items() if k in _OPENAI_TOOL_CHOICE_KEYS}
+    function = tool_choice.get("function")
+    if isinstance(function, dict):
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            cleaned["function"] = {"name": name}
+    if not cleaned:
+        return None
+    if "function" in cleaned and "type" not in cleaned:
+        cleaned["type"] = "function"
+    return cleaned
+
+
+def _sanitize_response_format(response_format: Any) -> Any:
+    if not isinstance(response_format, dict):
+        return response_format
+
+    rf_type = response_format.get("type")
+    if rf_type != "json_schema":
+        return {"type": rf_type} if isinstance(rf_type, str) and rf_type else None
+
+    cleaned = {"type": "json_schema"}
+    json_schema = response_format.get("json_schema")
+    if isinstance(json_schema, dict):
+        cleaned_schema = {
+            k: v
+            for k, v in json_schema.items()
+            if k in _OPENAI_RESPONSE_FORMAT_JSON_SCHEMA_KEYS
+        }
+        if cleaned_schema:
+            cleaned["json_schema"] = cleaned_schema
+    return cleaned
+
 
 def _sanitize_messages(messages: Any) -> list[dict[str, Any]]:
     if not isinstance(messages, list):
@@ -55,11 +214,27 @@ def _sanitize_messages(messages: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for msg in messages:
         if isinstance(msg, dict):
-            out.append({k: v for k, v in msg.items() if k in _OPENAI_MESSAGE_KEYS})
+            raw = {k: v for k, v in msg.items() if k in _OPENAI_MESSAGE_KEYS}
         else:
             # ChatMessage 等模型实例
             raw = msg.model_dump(mode="python", exclude_none=True)  # type: ignore[union-attr]
-            out.append({k: v for k, v in raw.items() if k in _OPENAI_MESSAGE_KEYS})
+            raw = {k: v for k, v in raw.items() if k in _OPENAI_MESSAGE_KEYS}
+
+        if "content" in raw:
+            raw["content"] = _sanitize_content(raw.get("content"))
+        if "tool_calls" in raw:
+            cleaned_tool_calls = _sanitize_tool_calls(raw.get("tool_calls"))
+            if cleaned_tool_calls:
+                raw["tool_calls"] = cleaned_tool_calls
+            else:
+                raw.pop("tool_calls", None)
+        if "function_call" in raw:
+            cleaned_function_call = _sanitize_function_call(raw.get("function_call"))
+            if cleaned_function_call:
+                raw["function_call"] = cleaned_function_call
+            else:
+                raw.pop("function_call", None)
+        out.append(raw)
     return out
 
 
@@ -241,6 +416,14 @@ class OpenAICompatibleProvider(BaseProvider):
             k: v for k, v in raw.items() if k in _OPENAI_CHAT_TOP_LEVEL_KEYS
         }
         payload["messages"] = _sanitize_messages(raw.get("messages", []))
+        if "tools" in raw:
+            payload["tools"] = _sanitize_tools(raw.get("tools"))
+        if "tool_choice" in raw:
+            payload["tool_choice"] = _sanitize_tool_choice(raw.get("tool_choice"))
+        if "response_format" in raw:
+            payload["response_format"] = _sanitize_response_format(
+                raw.get("response_format")
+            )
         if force_reasoning_echo_pad or _needs_mimo_reasoning_echo_pad(provider_model, self.config.base_url):
             _pad_mimo_reasoning_in_messages(payload["messages"])
         payload["model"] = provider_model
