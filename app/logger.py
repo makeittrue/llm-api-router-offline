@@ -47,7 +47,7 @@ def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
         else:
             ln = 0
         message_chars.append({"role": m.role, "chars": ln})
-    return {
+    meta: dict[str, Any] = {
         "message_count": len(request.messages),
         "roles": roles,
         "has_user": "user" in roles,
@@ -57,6 +57,11 @@ def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
         "temperature": request.temperature,
         "stream": bool(request.stream),
     }
+    # 记录 Kimi thinking 参数（对象，如 {"type": "enabled"}）
+    thinking = getattr(request, "thinking", None)
+    if thinking is not None:
+        meta["thinking"] = thinking
+    return meta
 
 
 class CallLogger:

@@ -604,6 +604,7 @@ async def chat_completions(
                     "finish_reason": finish_reason,
                     "assistant_chars": len(assistant_text or ""),
                     "preview": _log_preview_text(assistant_text or ""),
+                    "usage_raw": data.get("usage"),
                 },
             }
             call_logger.log_call(
@@ -698,6 +699,13 @@ def _accumulate_stream_sse_line(line: str, acc: dict) -> None:
     if data.get("id"):
         acc.setdefault("upstream_response_id", data["id"])
     u = data.get("usage")
+    # 兼容 Kimi：流式响应的 usage 可能在 choices[0] 中而不是顶层
+    if not isinstance(u, dict):
+        for choice in data.get("choices") or []:
+            cu = choice.get("usage")
+            if isinstance(cu, dict):
+                u = cu
+                break
     if isinstance(u, dict) and (
         u.get("prompt_tokens") is not None
         or u.get("completion_tokens") is not None
