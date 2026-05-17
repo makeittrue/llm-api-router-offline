@@ -31,6 +31,7 @@ _OPENAI_CHAT_TOP_LEVEL_KEYS = frozenset(
         "parallel_tool_calls",
         "response_format",
         "modalities",
+        "thinking",
     }
 )
 
