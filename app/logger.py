@@ -665,10 +665,7 @@ class CallLogger:
                     SUM(cache_write_tokens) as cache_write_tokens,
                     SUM(estimated_cost) as estimated_cost,
                     AVG(duration_ms) as avg_duration_ms,
-                    CASE
-                        WHEN COUNT(DISTINCT COALESCE(billing_currency, '')) = 1 THEN MAX(billing_currency)
-                        ELSE 'MIXED'
-                    END as billing_currency
+                    'CNY' as billing_currency
                 FROM call_logs
                 {where_clause}
                 GROUP BY model
