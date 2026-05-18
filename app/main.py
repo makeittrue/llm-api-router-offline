@@ -326,6 +326,27 @@ def _default_route_model_entry() -> dict[str, Any]:
     }
 
 
+def _billing_provider_options() -> list[dict[str, Any]]:
+    provider_meta = {provider.name: provider for provider in app_config.providers}
+    seen: set[str] = set()
+    options: list[dict[str, Any]] = []
+
+    for rule in app_config.billing.rules:
+        provider_name = rule.provider.strip()
+        if not provider_name or provider_name in seen:
+            continue
+        seen.add(provider_name)
+        provider = provider_meta.get(provider_name)
+        options.append(
+            {
+                "name": provider_name,
+                "base_url": provider.base_url if provider else "",
+                "api_type": provider.api_type if provider else "openai",
+            }
+        )
+    return options
+
+
 @app.get("/v1/models")
 async def list_models(current_user: dict = Depends(get_current_user)):
     # 合并全局模型和用户私有模型
@@ -1023,6 +1044,11 @@ async def get_global_providers(current_user: dict = Depends(get_current_user)):
             "api_type": provider.api_type
         })
     return {"providers": providers}
+
+
+@app.get("/v1/admin/billing/providers")
+async def get_billing_providers(current_user: dict = Depends(get_current_user)):
+    return {"providers": _billing_provider_options()}
 
 
 # ========== 用户路由管理接口 ==========

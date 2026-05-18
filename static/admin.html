@@ -637,7 +637,7 @@
                     btn.addEventListener("click", async () => {
                         const routeId = btn.dataset.id;
                         const route = data.routes.find(r => r.id == routeId);
-                        await loadProviders();
+                        await loadBillingProviders();
                         fillEditForm(route);
                     });
                 });
@@ -665,17 +665,30 @@
             }
         }
 
-        // 加载服务商配置
+        // 加载计费服务商选项（来自 billing.rules[].provider）
+        async function loadBillingProviders() {
+            try {
+                const res = await authFetch("/v1/admin/billing/providers");
+                const data = await res.json();
+                providerOptions = Array.isArray(data.providers) ? data.providers : [];
+                setProviderSelectOptions(getEffectiveProviderName());
+            } catch (e) {
+                console.error("加载计费服务商失败", e);
+                providerOptions = [];
+                setProviderSelectOptions(getEffectiveProviderName());
+            }
+        }
+
+        // 加载全局服务商展示列表
         async function loadProviders() {
             try {
                 const res = await authFetch("/v1/admin/providers");
                 const data = await res.json();
-                providerOptions = Array.isArray(data.providers) ? data.providers : [];
-                setProviderSelectOptions(getEffectiveProviderName());
                 const tbody = document.getElementById("providers-table-body");
                 tbody.innerHTML = "";
-                
-                providerOptions.forEach(provider => {
+
+                const providers = Array.isArray(data.providers) ? data.providers : [];
+                providers.forEach(provider => {
                     const tr = document.createElement("tr");
                     tr.innerHTML = `
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${provider.name}</td>
@@ -684,8 +697,8 @@
                     `;
                     tbody.appendChild(tr);
                 });
-                
-                document.getElementById("total-providers").textContent = providerOptions.length;
+
+                document.getElementById("total-providers").textContent = providers.length;
             } catch (e) {
                 console.error("加载服务商失败", e);
             }
@@ -1011,6 +1024,7 @@
                         localStorage.setItem("username", username);
                         hideLoginModal();
                         document.getElementById("currentUser").textContent = `欢迎，${username}`;
+                        await loadBillingProviders();
                         await loadUserRoutes();
                         await loadProviders();
                         await loadCharts();
@@ -1046,6 +1060,7 @@
                         hideLoginModal();
                         document.getElementById("currentUser").textContent = `欢迎，${username}`;
                         alert("注册成功");
+                        await loadBillingProviders();
                         await loadUserRoutes();
                         await loadProviders();
                         await loadCharts();
@@ -1151,7 +1166,7 @@
 
             // 新增路由按钮
             document.getElementById("addRouteBtn").addEventListener("click", async () => {
-                await loadProviders();
+                await loadBillingProviders();
                 showRouteModal(false);
             });
 
@@ -1293,6 +1308,7 @@
             initMonthFilter();
 
             // 加载初始数据
+            await loadBillingProviders();
             await loadUserRoutes();
             await loadProviders();
             await loadCharts();
