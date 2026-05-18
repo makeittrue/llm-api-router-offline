@@ -135,7 +135,7 @@
 
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <!-- 统计卡片 -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
             <div class="bg-white rounded-lg shadow p-6">
                 <div class="flex items-center">
                     <div class="bg-blue-100 rounded-full p-3 mr-4">
@@ -177,6 +177,17 @@
                     <div>
                         <p class="text-sm text-gray-500 mb-1">总Token消耗</p>
                         <p class="text-3xl font-bold text-gray-900" id="total-tokens">0</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-lg shadow p-6">
+                <div class="flex items-center">
+                    <div class="bg-amber-100 rounded-full p-3 mr-4">
+                        <i class="fa fa-money text-amber-600 text-xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-500 mb-1">总费用</p>
+                        <p class="text-3xl font-bold text-gray-900" id="total-cost">-</p>
                     </div>
                 </div>
             </div>
@@ -291,6 +302,7 @@
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">模型</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">服务商</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">总Token</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">费用</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">耗时(ms)</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
                             </tr>
@@ -317,7 +329,7 @@
                         </select>
                     </div>
                 </div>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     <div>
                         <h3 class="text-lg font-medium text-gray-900 mb-4">各模型调用次数</h3>
                         <div class="h-80">
@@ -328,6 +340,12 @@
                         <h3 class="text-lg font-medium text-gray-900 mb-4">各模型Token消耗</h3>
                         <div class="h-80">
                             <canvas id="tokens-chart"></canvas>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-medium text-gray-900 mb-4">各模型费用</h3>
+                        <div class="h-80">
+                            <canvas id="cost-chart"></canvas>
                         </div>
                     </div>
                 </div>
@@ -341,7 +359,9 @@
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">调用次数</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">输入Token</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">输出Token</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">缓存命中Token</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">总Token</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">费用</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">平均耗时(ms)</th>
                                 </tr>
                             </thead>
@@ -358,6 +378,26 @@
         let currentEditingRouteId = null;
         let logsPage = 0;
         const LOG_PAGE_SIZE = 20;
+
+        function currencySymbol(currency) {
+            if (currency === "CNY") return "¥";
+            if (currency === "USD") return "$";
+            return currency ? `${currency} ` : "";
+        }
+
+        function formatCost(value, currency) {
+            const num = Number(value);
+            if (!Number.isFinite(num)) return "-";
+            return `${currencySymbol(currency)}${num.toFixed(num >= 100 ? 2 : 4)}`;
+        }
+
+        function formatCurrencyTotals(currencyTotals) {
+            const entries = Object.entries(currencyTotals).filter(([, value]) => Number.isFinite(value));
+            if (!entries.length) return "-";
+            return entries
+                .map(([currency, value]) => formatCost(value, currency))
+                .join(" / ");
+        }
 
         // 带Token的fetch封装
         async function authFetch(url, options = {}) {
@@ -606,7 +646,7 @@
             // 发起请求前显示加载态
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="6" class="px-6 py-12 text-center text-gray-500">
+                    <td colspan="7" class="px-6 py-12 text-center text-gray-500">
                         <i class="fa fa-circle-o-notch fa-spin text-2xl mb-2"></i>
                         <p>加载中...</p>
                     </td>
@@ -639,12 +679,14 @@
                     const statusBadge = log.status === "success" 
                         ? `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">成功</span>`
                         : `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">失败</span>`;
+                    const costText = formatCost(log.estimated_cost, log.billing_currency);
                     
                     tr.innerHTML = `
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${time}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${log.model}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${log.provider || "-"}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${log.total_tokens || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${costText}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${log.duration_ms || 0}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${statusBadge}</td>
                     `;
@@ -666,7 +708,7 @@
                         const detailRow = document.createElement("tr");
                         detailRow.classList.add("log-detail-row", "bg-gray-50");
                         detailRow.innerHTML = `
-                            <td colspan="6" class="px-6 py-4">
+                            <td colspan="7" class="px-6 py-4">
                                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                                     <div>
                                         <h4 class="font-bold text-sm mb-2 text-gray-700">请求消息</h4>
@@ -677,6 +719,8 @@
                                         <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${(() => { const m = log.log_meta; if (m == null || m === '') return '-'; try { const o = typeof m === 'string' ? JSON.parse(m) : m; return JSON.stringify(o, null, 2); } catch (e) { return String(m); } })()}</pre>
                                     </div>
                                     <div>
+                                        <h4 class="font-bold text-sm mb-2 text-gray-700">计费信息</h4>
+                                        <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${(() => { const m = log.billing_meta; if (m == null || m === '') return '-'; try { const o = typeof m === 'string' ? JSON.parse(m) : m; return JSON.stringify(o, null, 2); } catch (e) { return String(m); } })()}</pre>
                                         <h4 class="font-bold text-sm mb-2 text-gray-700">错误信息</h4>
                                         <pre class="bg-gray-100 p-3 rounded-md text-xs overflow-x-auto whitespace-pre-wrap">${log.error_message || "-"}</pre>
                                     </div>
@@ -695,7 +739,7 @@
                 if (info) info.textContent = "加载失败";
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="6" class="px-6 py-12 text-center text-red-500">
+                        <td colspan="7" class="px-6 py-12 text-center text-red-500">
                             <i class="fa fa-exclamation-triangle text-2xl mb-2"></i>
                             <p>加载失败，请重试</p>
                         </td>
@@ -734,9 +778,11 @@
                 
                 let totalCalls = 0;
                 let totalTokens = 0;
+                const currencyTotals = {};
                 const labels = [];
                 const callCounts = [];
                 const tokenCounts = [];
+                const costCounts = [];
                 
                 summary.forEach(item => {
                     const tr = document.createElement("tr");
@@ -745,7 +791,9 @@
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.call_count}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.total_prompt_tokens || 0}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.total_completion_tokens || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.cached_input_tokens || 0}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${item.total_tokens || 0}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${formatCost(item.estimated_cost, item.billing_currency)}</td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${Math.round(item.avg_duration_ms || 0)}</td>
                     `;
                     tbody.appendChild(tr);
@@ -753,12 +801,17 @@
                     labels.push(item.model);
                     callCounts.push(item.call_count);
                     tokenCounts.push(item.total_tokens || 0);
+                    costCounts.push(Number(item.estimated_cost || 0));
                     totalCalls += item.call_count;
                     totalTokens += item.total_tokens || 0;
+                    if (item.billing_currency) {
+                        currencyTotals[item.billing_currency] = (currencyTotals[item.billing_currency] || 0) + Number(item.estimated_cost || 0);
+                    }
                 });
                 
                 document.getElementById("total-calls").textContent = totalCalls;
                 document.getElementById("total-tokens").textContent = totalTokens >= 1000 ? (totalTokens / 1000).toFixed(1) + "k" : totalTokens;
+                document.getElementById("total-cost").textContent = formatCurrencyTotals(currencyTotals);
                 
                 // 绘制调用次数图表
                 const callsCtx = document.getElementById("calls-chart").getContext("2d");
@@ -813,6 +866,31 @@
                         plugins: {
                             legend: {
                                 position: "right"
+                            }
+                        }
+                    }
+                });
+
+                const costCtx = document.getElementById("cost-chart").getContext("2d");
+                if (window.costChart) window.costChart.destroy();
+                window.costChart = new Chart(costCtx, {
+                    type: "bar",
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: "费用",
+                            data: costCounts,
+                            backgroundColor: "rgba(245, 158, 11, 0.7)",
+                            borderColor: "rgba(245, 158, 11, 1)",
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true
                             }
                         }
                     }

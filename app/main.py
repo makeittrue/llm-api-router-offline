@@ -33,7 +33,7 @@ async def lifespan(application: FastAPI):
 
     app_config = load_config()
     router = Router(app_config)
-    call_logger = CallLogger(app_config.log.db_path)
+    call_logger = CallLogger(app_config.log.db_path, app_config.billing)
 
     yield
 
@@ -943,6 +943,16 @@ async def get_logs_summary(
     current_user: dict = Depends(get_current_user)
 ):
     summary = call_logger.get_usage_summary(user_id=current_user["id"], model=model, month=month)
+    return {"data": summary}
+
+
+@app.get("/v1/billing/summary")
+async def get_billing_summary(
+    model: str | None = None,
+    month: str | None = None,
+    current_user: dict = Depends(get_current_user)
+):
+    summary = call_logger.get_billing_summary(user_id=current_user["id"], model=model, month=month)
     return {"data": summary}
 
 

@@ -30,6 +30,55 @@ class LogConfig(BaseModel):
     db_path: str = "logs.db"
 
 
+class BillingTimeWindowConfig(BaseModel):
+    name: str | None = None
+    timezone: str = "UTC"
+    weekdays: list[int] = Field(default_factory=list)
+    start_time: str | None = None
+    end_time: str | None = None
+    start_at: str | None = None
+    end_at: str | None = None
+    input_price: float | None = Field(default=None, ge=0)
+    output_price: float | None = Field(default=None, ge=0)
+    cache_read_price: float | None = Field(default=None, ge=0)
+    cache_write_price: float | None = Field(default=None, ge=0)
+
+
+class BillingTokenTierConfig(BaseModel):
+    name: str | None = None
+    min_prompt_tokens: int | None = Field(default=None, ge=0)
+    max_prompt_tokens: int | None = Field(default=None, ge=0)
+    input_price: float | None = Field(default=None, ge=0)
+    output_price: float | None = Field(default=None, ge=0)
+    cache_read_price: float | None = Field(default=None, ge=0)
+    cache_write_price: float | None = Field(default=None, ge=0)
+
+
+class BillingRuleConfig(BaseModel):
+    provider: str
+    provider_aliases: list[str] = Field(default_factory=list)
+    provider_model_patterns: list[str] = Field(default_factory=list)
+    match_mode: str = "exact"
+    input_price: float = Field(default=0, ge=0)
+    output_price: float = Field(default=0, ge=0)
+    cache_read_price: float | None = Field(default=None, ge=0)
+    cache_write_price: float | None = Field(default=None, ge=0)
+    unit: int = Field(default=1_000_000, ge=1)
+    currency: str = "CNY"
+    source_url: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
+    note: str | None = None
+    token_tiers: list[BillingTokenTierConfig] = Field(default_factory=list)
+    time_windows: list[BillingTimeWindowConfig] = Field(default_factory=list)
+
+
+class BillingConfig(BaseModel):
+    enabled: bool = True
+    default_currency: str = "CNY"
+    round_digits: int = Field(default=8, ge=0, le=12)
+    rules: list[BillingRuleConfig] = Field(default_factory=list)
+
+
 class PathPrefixRewrite(BaseModel):
     """将历史/模型输出里的旧绝对路径前缀换成当前机器的工作区（Trae 工具在本地执行）。"""
 
@@ -105,6 +154,7 @@ def route_targets_long_context(
 class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     log: LogConfig = LogConfig()
+    billing: BillingConfig = BillingConfig()
     context: ContextConfig = ContextConfig()
     providers: list[ProviderConfig] = []
     routes: list[RouteConfig] = []

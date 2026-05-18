@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.billing import calculate_request_cost
+from app.config import BillingConfig
 from app.models import ChatCompletionRequest, ChatCompletionResponse
 
 # SQLite / 内存：超大 messages 或不可序列化对象会导致 log_call 抛错，进而让流式响应末尾变成 HTTP 500
@@ -15,6 +17,21 @@ _MAX_LOG_JSON_CHARS = 512_000
 def _usage_tokens_triple(u: Any) -> tuple[int, int, int]:
     if u is None:
         return 0, 0, 0
+
+
+def _usage_dict(u: Any) -> dict[str, Any] | None:
+    if u is None:
+        return None
+    if isinstance(u, dict):
+        return u
+    if hasattr(u, "model_dump"):
+        try:
+            dumped = u.model_dump(mode="python", exclude_none=True)
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return None
+    return None
     if isinstance(u, dict):
         return (
             int(u.get("prompt_tokens") or 0),
@@ -65,8 +82,9 @@ def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
 
 
 class CallLogger:
-    def __init__(self, db_path: str = "logs.db"):
+    def __init__(self, db_path: str = "logs.db", billing_config: BillingConfig | None = None):
         self.db_path = db_path
+        self.billing_config = billing_config
         self._init_db()
 
     def _init_db(self):
@@ -89,7 +107,13 @@ class CallLogger:
                 request_messages TEXT,
                 created_at TEXT NOT NULL,
                 duration_ms INTEGER DEFAULT 0,
-                log_meta TEXT
+                log_meta TEXT,
+                cached_input_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                estimated_cost REAL,
+                billing_currency TEXT,
+                billing_rule TEXT,
+                billing_meta TEXT
             )
         """)
         conn.execute("""
@@ -106,6 +130,21 @@ class CallLogger:
         if "log_meta" not in existing:
             try:
                 conn.execute("ALTER TABLE call_logs ADD COLUMN log_meta TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+        for column_name, column_type in (
+            ("cached_input_tokens", "INTEGER DEFAULT 0"),
+            ("cache_write_tokens", "INTEGER DEFAULT 0"),
+            ("estimated_cost", "REAL"),
+            ("billing_currency", "TEXT"),
+            ("billing_rule", "TEXT"),
+            ("billing_meta", "TEXT"),
+        ):
+            if column_name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE call_logs ADD COLUMN {column_name} {column_type}")
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
@@ -400,6 +439,7 @@ class CallLogger:
         conn = sqlite3.connect(self.db_path)
         try:
             is_stream = 1 if request.stream else 0
+            created_at = datetime.now(timezone.utc)
 
             if stream_usage:
                 pt = int(stream_usage.get("prompt_tokens") or 0)
@@ -418,6 +458,19 @@ class CallLogger:
                 request_id = str(rid) if rid is not None else None
             elif response is not None:
                 request_id = response.id
+
+            usage_raw: dict[str, Any] | None = None
+            if response_body is not None:
+                usage_raw = _usage_dict(response_body.get("usage"))
+            elif response is not None:
+                usage_raw = _usage_dict(response.usage)
+            if usage_raw is None and log_meta:
+                usage_raw = (
+                    _usage_dict(log_meta.get("response", {}).get("usage_raw"))
+                    or _usage_dict(log_meta.get("stream", {}).get("usage_raw"))
+                )
+            if usage_raw is None and stream_usage:
+                usage_raw = dict(stream_usage)
 
             try:
                 messages_json = json.dumps(
@@ -455,14 +508,46 @@ class CallLogger:
                         ensure_ascii=False,
                     )
 
+            billing_result = None
+            if status == "success":
+                billing_result = calculate_request_cost(
+                    billing_config=self.billing_config,
+                    provider_name=provider_name,
+                    provider_model=provider_model,
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    usage_raw=usage_raw,
+                    created_at=created_at,
+                )
+
+            billing_meta_json: str | None = None
+            billing_currency: str | None = None
+            billing_rule: str | None = None
+            cached_input_tokens = 0
+            cache_write_tokens = 0
+            estimated_cost: float | None = None
+            if billing_result is not None:
+                billing_currency = billing_result.get("currency")
+                patterns = [str(p) for p in (billing_result.get("rule_model_patterns") or [])]
+                billing_rule = f"{billing_result.get('rule_provider')}:{'|'.join(patterns)}"
+                cached_input_tokens = int(billing_result.get("cached_input_tokens") or 0)
+                cache_write_tokens = int(billing_result.get("cache_write_tokens") or 0)
+                estimated_cost = float((billing_result.get("costs") or {}).get("total_cost") or 0)
+                try:
+                    billing_meta_json = json.dumps(billing_result, ensure_ascii=False)
+                except (TypeError, ValueError) as e:
+                    billing_meta_json = json.dumps({"_error": f"billing_meta 序列化失败: {e}"}, ensure_ascii=False)
+
             conn.execute(
                 """
                 INSERT INTO call_logs (
                     request_id, model, provider, provider_model,
                     prompt_tokens, completion_tokens, total_tokens,
                     is_stream, status, error_message, user_id,
-                    request_messages, created_at, duration_ms, log_meta
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    request_messages, created_at, duration_ms, log_meta,
+                    cached_input_tokens, cache_write_tokens, estimated_cost,
+                    billing_currency, billing_rule, billing_meta
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -477,9 +562,15 @@ class CallLogger:
                     error_message,
                     user_id,
                     messages_json,
-                    datetime.now(timezone.utc).isoformat(),
+                    created_at.isoformat(),
                     duration_ms,
                     log_meta_json,
+                    cached_input_tokens,
+                    cache_write_tokens,
+                    estimated_cost,
+                    billing_currency,
+                    billing_rule,
+                    billing_meta_json,
                 ),
             )
             conn.commit()
@@ -568,10 +659,61 @@ class CallLogger:
                     SUM(prompt_tokens) as total_prompt_tokens,
                     SUM(completion_tokens) as total_completion_tokens,
                     SUM(total_tokens) as total_tokens,
-                    AVG(duration_ms) as avg_duration_ms
+                    SUM(cached_input_tokens) as cached_input_tokens,
+                    SUM(cache_write_tokens) as cache_write_tokens,
+                    SUM(estimated_cost) as estimated_cost,
+                    AVG(duration_ms) as avg_duration_ms,
+                    CASE
+                        WHEN COUNT(DISTINCT COALESCE(billing_currency, '')) = 1 THEN MAX(billing_currency)
+                        ELSE 'MIXED'
+                    END as billing_currency
                 FROM call_logs
                 {where_clause}
                 GROUP BY model
+            """
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_billing_summary(
+        self, user_id: int | None = None, model: str | None = None, month: str | None = None
+    ) -> list[dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conditions = ["status = 'success'"]
+            params = []
+            if user_id:
+                conditions.append("user_id = ?")
+                params.append(str(user_id))
+            if model:
+                conditions.append("model = ?")
+                params.append(model)
+            if month:
+                conditions.append("strftime('%Y-%m', created_at) = ?")
+                params.append(month)
+
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            sql = f"""
+                SELECT
+                    model,
+                    provider,
+                    provider_model,
+                    billing_currency,
+                    COUNT(*) as call_count,
+                    SUM(prompt_tokens) as total_prompt_tokens,
+                    SUM(completion_tokens) as total_completion_tokens,
+                    SUM(total_tokens) as total_tokens,
+                    SUM(cached_input_tokens) as cached_input_tokens,
+                    SUM(cache_write_tokens) as cache_write_tokens,
+                    SUM(estimated_cost) as estimated_cost_total,
+                    AVG(COALESCE(estimated_cost, 0)) as avg_cost_per_call,
+                    AVG(duration_ms) as avg_duration_ms
+                FROM call_logs
+                {where_clause}
+                GROUP BY model, provider, provider_model, billing_currency
+                ORDER BY estimated_cost_total DESC, total_tokens DESC, model ASC
             """
             rows = conn.execute(sql, params).fetchall()
             return [dict(row) for row in rows]
