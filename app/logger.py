@@ -18,6 +18,21 @@ def _usage_tokens_triple(u: Any) -> tuple[int, int, int]:
     if u is None:
         return 0, 0, 0
 
+    if isinstance(u, dict):
+        return (
+            int(u.get("prompt_tokens") or 0),
+            int(u.get("completion_tokens") or 0),
+            int(u.get("total_tokens") or 0),
+        )
+
+    pt = getattr(u, "prompt_tokens", None)
+    ct = getattr(u, "completion_tokens", None)
+    tt = getattr(u, "total_tokens", None)
+    try:
+        return int(pt or 0), int(ct or 0), int(tt or 0)
+    except (TypeError, ValueError):
+        return 0, 0, 0
+
 
 def _usage_dict(u: Any) -> dict[str, Any] | None:
     if u is None:
@@ -32,19 +47,6 @@ def _usage_dict(u: Any) -> dict[str, Any] | None:
         except Exception:
             return None
     return None
-    if isinstance(u, dict):
-        return (
-            int(u.get("prompt_tokens") or 0),
-            int(u.get("completion_tokens") or 0),
-            int(u.get("total_tokens") or 0),
-        )
-    pt = getattr(u, "prompt_tokens", None)
-    ct = getattr(u, "completion_tokens", None)
-    tt = getattr(u, "total_tokens", None)
-    try:
-        return int(pt or 0), int(ct or 0), int(tt or 0)
-    except (TypeError, ValueError):
-        return 0, 0, 0
 
 
 def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
