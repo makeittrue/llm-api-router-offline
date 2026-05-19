@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -20,22 +21,51 @@ from app.logger import CallLogger, build_request_log_meta
 from app.models import ChatCompletionRequest, ModelListResponse
 from app.providers.base import BaseProvider, UpstreamError, create_provider
 from app.router import Router
+from app.usage_notifications import UsageNotificationService
 
 app_config: AppConfig | None = None
 router: Router | None = None
 call_logger: CallLogger | None = None
+notification_service: UsageNotificationService | None = None
+notification_scheduler_task: asyncio.Task | None = None
+notification_scheduler_stop: asyncio.Event | None = None
 DEFAULT_ROUTE_MODEL = "default"
+_FEISHU_RECEIVE_ID_TYPES = {"open_id", "user_id", "union_id", "email", "chat_id"}
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global app_config, router, call_logger
+    global notification_service, notification_scheduler_task, notification_scheduler_stop
 
     app_config = load_config()
     router = Router(app_config)
     call_logger = CallLogger(app_config.log.db_path, app_config.billing)
+    notification_service = None
+    notification_scheduler_task = None
+    notification_scheduler_stop = None
 
-    yield
+    try:
+        notification_service = UsageNotificationService(app_config, call_logger)
+        if notification_service.enabled:
+            notification_scheduler_stop = asyncio.Event()
+            notification_scheduler_task = asyncio.create_task(
+                notification_service.run_scheduler(notification_scheduler_stop)
+            )
+    except Exception as e:
+        # 通知能力异常不应阻塞主服务启动。
+        print(f"[WARN] 初始化用量通知失败，已跳过: {e}")
+
+    try:
+        yield
+    finally:
+        if notification_scheduler_stop is not None:
+            notification_scheduler_stop.set()
+        if notification_scheduler_task is not None:
+            try:
+                await notification_scheduler_task
+            except Exception as e:
+                print(f"[WARN] 用量通知调度退出异常: {e}")
 
 
 app = FastAPI(title="LLM API Router", version="1.0.0", lifespan=lifespan)
@@ -263,6 +293,17 @@ class DefaultRouteUpdate(BaseModel):
     models: list[str] = Field(default_factory=list)
 
 
+class UserNotificationSettingsUpdate(BaseModel):
+    enabled: bool
+    daily_summary_enabled: bool = True
+    alerts_enabled: bool = True
+    feishu_app_id: str
+    feishu_app_secret: str | None = None
+    feishu_receive_id_type: str = "open_id"
+    feishu_receive_id: str
+    daily_summary_time: str = "09:00"
+
+
 def _normalize_model_names(models: list[str] | None) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -313,6 +354,43 @@ def _get_user_default_route_config(user_id: int) -> dict[str, Any]:
     return {
         "enabled": bool(config.get("enabled")),
         "models": _normalize_model_names(config.get("models") or []),
+        "updated_at": config.get("updated_at"),
+    }
+
+
+def _validate_daily_summary_time(value: str) -> str:
+    candidate = (value or "").strip()
+    try:
+        hour_text, minute_text = candidate.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except ValueError as e:
+        raise ValueError("日报时间格式必须为 HH:MM") from e
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("日报时间超出范围，请使用 00:00 到 23:59")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _normalize_feishu_receive_id_type(value: str) -> str:
+    candidate = (value or "open_id").strip()
+    if candidate not in _FEISHU_RECEIVE_ID_TYPES:
+        raise ValueError(
+            "飞书接收人类型不支持，请使用 open_id、user_id、union_id、email 或 chat_id"
+        )
+    return candidate
+
+
+def _get_user_notification_settings(user_id: int) -> dict[str, Any]:
+    config = call_logger.get_user_notification_settings(user_id)
+    return {
+        "enabled": bool(config.get("enabled")),
+        "daily_summary_enabled": bool(config.get("daily_summary_enabled")),
+        "alerts_enabled": bool(config.get("alerts_enabled")),
+        "feishu_app_id": config.get("feishu_app_id") or "",
+        "feishu_app_secret_configured": bool(config.get("feishu_app_secret_configured")),
+        "feishu_receive_id_type": config.get("feishu_receive_id_type") or "open_id",
+        "feishu_receive_id": config.get("feishu_receive_id") or "",
+        "daily_summary_time": config.get("daily_summary_time") or "09:00",
         "updated_at": config.get("updated_at"),
     }
 
@@ -1079,6 +1157,50 @@ async def update_user_default_route(
             models=validated_models,
         )
         return saved
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/v1/user/notifications/feishu")
+async def get_user_feishu_notification_settings(current_user: dict = Depends(get_current_user)):
+    return _get_user_notification_settings(current_user["id"])
+
+
+@app.put("/v1/user/notifications/feishu")
+async def update_user_feishu_notification_settings(
+    settings: UserNotificationSettingsUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    try:
+        current = call_logger.get_user_notification_settings(current_user["id"])
+        app_id = settings.feishu_app_id.strip()
+        receive_id = settings.feishu_receive_id.strip()
+        receive_id_type = _normalize_feishu_receive_id_type(settings.feishu_receive_id_type)
+        daily_summary_time = _validate_daily_summary_time(settings.daily_summary_time)
+        secret_input = (settings.feishu_app_secret or "").strip()
+        if settings.enabled or settings.daily_summary_enabled or settings.alerts_enabled:
+            if not app_id:
+                raise ValueError("请输入飞书应用 App ID")
+            if not receive_id:
+                raise ValueError("请输入飞书接收人 ID")
+            if not secret_input and not current.get("feishu_app_secret_configured"):
+                raise ValueError("请输入飞书应用 App Secret")
+
+        saved = call_logger.upsert_user_notification_settings(
+            current_user["id"],
+            enabled=settings.enabled,
+            daily_summary_enabled=settings.daily_summary_enabled,
+            alerts_enabled=settings.alerts_enabled,
+            feishu_app_id=app_id,
+            feishu_app_secret=secret_input or None,
+            feishu_receive_id_type=receive_id_type,
+            feishu_receive_id=receive_id,
+            daily_summary_time=daily_summary_time,
+        )
+        return {
+            "message": "通知设置已保存",
+            **_get_user_notification_settings(current_user["id"]),
+        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

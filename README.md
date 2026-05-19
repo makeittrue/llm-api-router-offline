@@ -22,6 +22,9 @@ LLM API 统一路由网关，聚合多个运营商的大模型API，提供统一
 ✅ **完整调用日志**  
 SQLite存储所有调用记录，包含调用时间、token使用量、耗时、请求内容、状态等信息，支持日志查询和用量统计。
 
+✅ **飞书用量通知**
+支持每个用户在页面自行填写飞书应用与接收人信息，按个人开关和时间接收每日日报与阈值预警，并兼容内置调度和外部 cron。
+
 ✅ **100% OpenAI 兼容**  
 完全兼容OpenAI API格式，用户可以直接使用OpenAI SDK调用，无需修改代码。
 
@@ -144,6 +147,42 @@ routes:
     provider_model: "gpt-4o"
 ```
 
+### 2.1 启用飞书通知能力（可选）
+先在 `config.yaml` 中打开通知能力与全局预警规则；每个用户自己的 `App ID`、`App Secret`、接收人 ID、开关和日报时间，都在管理页面的「通知设置」里单独填写：
+
+```yaml
+notifications:
+  enabled: true
+  timezone: "Asia/Shanghai"
+  feishu:
+    enabled: true
+    base_url: "https://open.feishu.cn"
+    receive_id_type: "open_id"
+  daily_summary:
+    send_time: "09:00"
+  alerts:
+    enabled: true
+    scan_interval_seconds: 300
+    rules:
+      - name: "daily-cost-50"
+        metric: "daily_cost"
+        threshold: 50
+      - name: "daily-tokens-5m"
+        metric: "daily_tokens"
+        threshold: 5000000
+      - name: "daily-calls-200"
+        metric: "daily_calls"
+        threshold: 200
+```
+
+说明：
+- `notifications.enabled` 和 `notifications.feishu.enabled` 是系统级总开关；不开启时不会启动飞书通知能力。
+- 每个用户登录后，可在管理页面「通知设置」里单独填写自己的飞书 `App ID`、`App Secret`、接收人类型、接收人 ID，并分别开启/关闭日报和预警。
+- `App Secret` 保存后不会通过 API 明文返回；后续编辑时留空表示“保持原值不变”。
+- 当前支持 3 类阈值指标：`daily_cost`、`daily_tokens`、`daily_calls`。
+- 每日总结默认发送“上一自然日”的用量；用户可以在页面自定义每日发送时间，时区使用 `notifications.timezone`。
+- 同一用户同一天的日报、同一条阈值规则的预警都会写入 SQLite `notification_events` 去重，避免内置调度和 cron 同时运行时重复发送。
+
 ### 3. 启动服务
 ```bash
 python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -169,6 +208,27 @@ response = client.chat.completions.create(
     messages=[{"role": "user", "content": "你好！"}]
 )
 print(response.choices[0].message.content)
+```
+
+### 6. 外部 cron 触发通知（可选）
+如果你不想依赖服务内置调度，也可以直接调用命令行入口：
+
+```bash
+# 发送上一自然日日报（默认读取 config.yaml）
+python -m app.usage_notifications daily-summary
+
+# 扫描今天的阈值预警
+python -m app.usage_notifications scan-alerts
+
+# 指定配置文件或指定日期
+python -m app.usage_notifications --config /path/to/config.yaml daily-summary --date 2026-05-18
+python -m app.usage_notifications scan-alerts --date 2026-05-19
+```
+
+如果你想把内置调度单独以前台进程跑起来，也可以执行：
+
+```bash
+python -m app.usage_notifications run-scheduler
 ```
 
 非流式调用：

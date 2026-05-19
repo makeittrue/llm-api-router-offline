@@ -79,6 +79,40 @@ class BillingConfig(BaseModel):
     rules: list[BillingRuleConfig] = Field(default_factory=list)
 
 
+class FeishuConfig(BaseModel):
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+    base_url: str = "https://open.feishu.cn"
+    receive_id_type: str = "open_id"
+    user_targets: dict[str, str] = Field(default_factory=dict)
+
+
+class DailySummaryConfig(BaseModel):
+    enabled: bool = False
+    send_time: str = "09:00"
+
+
+class UsageAlertRuleConfig(BaseModel):
+    name: str
+    metric: str
+    threshold: float = Field(ge=0)
+
+
+class AlertsConfig(BaseModel):
+    enabled: bool = False
+    scan_interval_seconds: int = Field(default=300, ge=30, le=86_400)
+    rules: list[UsageAlertRuleConfig] = Field(default_factory=list)
+
+
+class NotificationsConfig(BaseModel):
+    enabled: bool = False
+    timezone: str = "Asia/Shanghai"
+    feishu: FeishuConfig = FeishuConfig()
+    daily_summary: DailySummaryConfig = DailySummaryConfig()
+    alerts: AlertsConfig = AlertsConfig()
+
+
 class PathPrefixRewrite(BaseModel):
     """将历史/模型输出里的旧绝对路径前缀换成当前机器的工作区（Trae 工具在本地执行）。"""
 
@@ -155,6 +189,7 @@ class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     log: LogConfig = LogConfig()
     billing: BillingConfig = BillingConfig()
+    notifications: NotificationsConfig = NotificationsConfig()
     context: ContextConfig = ContextConfig()
     providers: list[ProviderConfig] = []
     routes: list[RouteConfig] = []
@@ -176,6 +211,17 @@ def load_config(config_path: str | None = None) -> AppConfig:
             env_val = os.getenv(provider["api_key"], "")
             if env_val:
                 provider["api_key"] = env_val
+
+    notifications = raw.get("notifications")
+    if isinstance(notifications, dict):
+        feishu = notifications.get("feishu")
+        if isinstance(feishu, dict):
+            for secret_key in ("app_id", "app_secret"):
+                secret_ref = feishu.get(secret_key)
+                if secret_ref:
+                    env_val = os.getenv(secret_ref, "")
+                    if env_val:
+                        feishu[secret_key] = env_val
 
     return AppConfig(**raw)
 

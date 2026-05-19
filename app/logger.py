@@ -189,6 +189,49 @@ class CallLogger:
                 updated_at TEXT NOT NULL
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_notification_settings (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                daily_summary_enabled INTEGER NOT NULL DEFAULT 0,
+                alerts_enabled INTEGER NOT NULL DEFAULT 0,
+                feishu_app_id TEXT,
+                feishu_app_secret TEXT,
+                feishu_receive_id_type TEXT NOT NULL DEFAULT 'open_id',
+                feishu_receive_id TEXT,
+                daily_summary_time TEXT NOT NULL DEFAULT '09:00',
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notification_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                user_id TEXT,
+                username TEXT,
+                event_date TEXT,
+                metric TEXT,
+                threshold_value REAL,
+                observed_value REAL,
+                payload TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notification_events_user_date
+            ON notification_events(user_id, event_date DESC)
+        """)
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(notification_events)").fetchall()}
+        if "status" not in existing:
+            try:
+                conn.execute("ALTER TABLE notification_events ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         
         conn.commit()
         conn.close()
@@ -237,6 +280,21 @@ class CallLogger:
                 (user_id,),
             ).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_users(self) -> list[dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, username, created_at
+                FROM users
+                ORDER BY username ASC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
         finally:
             conn.close()
             
@@ -423,6 +481,194 @@ class CallLogger:
         finally:
             conn.close()
         return self.get_user_default_route(user_id)
+
+    def get_user_notification_settings(self, user_id: int) -> dict[str, Any]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    user_id,
+                    enabled,
+                    daily_summary_enabled,
+                    alerts_enabled,
+                    feishu_app_id,
+                    feishu_app_secret,
+                    feishu_receive_id_type,
+                    feishu_receive_id,
+                    daily_summary_time,
+                    updated_at
+                FROM user_notification_settings
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if not row:
+                return {
+                    "user_id": user_id,
+                    "enabled": False,
+                    "daily_summary_enabled": False,
+                    "alerts_enabled": False,
+                    "feishu_app_id": "",
+                    "feishu_app_secret": None,
+                    "feishu_app_secret_configured": False,
+                    "feishu_receive_id_type": "open_id",
+                    "feishu_receive_id": "",
+                    "daily_summary_time": "09:00",
+                    "updated_at": None,
+                }
+            data = dict(row)
+            data["enabled"] = bool(data.get("enabled"))
+            data["daily_summary_enabled"] = bool(data.get("daily_summary_enabled"))
+            data["alerts_enabled"] = bool(data.get("alerts_enabled"))
+            data["feishu_app_secret_configured"] = bool(data.get("feishu_app_secret"))
+            data["feishu_app_secret"] = None
+            return data
+        finally:
+            conn.close()
+
+    def get_user_notification_settings_with_secret(self, user_id: int) -> dict[str, Any]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    user_id,
+                    enabled,
+                    daily_summary_enabled,
+                    alerts_enabled,
+                    feishu_app_id,
+                    feishu_app_secret,
+                    feishu_receive_id_type,
+                    feishu_receive_id,
+                    daily_summary_time,
+                    updated_at
+                FROM user_notification_settings
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if not row:
+                return {
+                    "user_id": user_id,
+                    "enabled": False,
+                    "daily_summary_enabled": False,
+                    "alerts_enabled": False,
+                    "feishu_app_id": "",
+                    "feishu_app_secret": "",
+                    "feishu_receive_id_type": "open_id",
+                    "feishu_receive_id": "",
+                    "daily_summary_time": "09:00",
+                    "updated_at": None,
+                }
+            data = dict(row)
+            data["enabled"] = bool(data.get("enabled"))
+            data["daily_summary_enabled"] = bool(data.get("daily_summary_enabled"))
+            data["alerts_enabled"] = bool(data.get("alerts_enabled"))
+            return data
+        finally:
+            conn.close()
+
+    def upsert_user_notification_settings(
+        self,
+        user_id: int,
+        *,
+        enabled: bool,
+        daily_summary_enabled: bool,
+        alerts_enabled: bool,
+        feishu_app_id: str,
+        feishu_app_secret: str | None,
+        feishu_receive_id_type: str,
+        feishu_receive_id: str,
+        daily_summary_time: str,
+    ) -> dict[str, Any]:
+        current = self.get_user_notification_settings_with_secret(user_id)
+        app_secret = (
+            feishu_app_secret.strip()
+            if isinstance(feishu_app_secret, str) and feishu_app_secret.strip()
+            else str(current.get("feishu_app_secret") or "")
+        )
+        updated_at = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO user_notification_settings (
+                    user_id,
+                    enabled,
+                    daily_summary_enabled,
+                    alerts_enabled,
+                    feishu_app_id,
+                    feishu_app_secret,
+                    feishu_receive_id_type,
+                    feishu_receive_id,
+                    daily_summary_time,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    daily_summary_enabled = excluded.daily_summary_enabled,
+                    alerts_enabled = excluded.alerts_enabled,
+                    feishu_app_id = excluded.feishu_app_id,
+                    feishu_app_secret = excluded.feishu_app_secret,
+                    feishu_receive_id_type = excluded.feishu_receive_id_type,
+                    feishu_receive_id = excluded.feishu_receive_id,
+                    daily_summary_time = excluded.daily_summary_time,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    1 if enabled else 0,
+                    1 if daily_summary_enabled else 0,
+                    1 if alerts_enabled else 0,
+                    feishu_app_id.strip(),
+                    app_secret,
+                    feishu_receive_id_type.strip() or "open_id",
+                    feishu_receive_id.strip(),
+                    daily_summary_time.strip() or "09:00",
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return self.get_user_notification_settings(user_id)
+
+    def list_active_notification_settings(self) -> list[dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    s.user_id,
+                    u.username,
+                    s.enabled,
+                    s.daily_summary_enabled,
+                    s.alerts_enabled,
+                    s.feishu_app_id,
+                    s.feishu_app_secret,
+                    s.feishu_receive_id_type,
+                    s.feishu_receive_id,
+                    s.daily_summary_time,
+                    s.updated_at
+                FROM user_notification_settings s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.enabled = 1
+                  AND (s.daily_summary_enabled = 1 OR s.alerts_enabled = 1)
+                ORDER BY s.user_id ASC
+                """
+            ).fetchall()
+            results = [dict(row) for row in rows]
+            for item in results:
+                item["enabled"] = bool(item.get("enabled"))
+                item["daily_summary_enabled"] = bool(item.get("daily_summary_enabled"))
+                item["alerts_enabled"] = bool(item.get("alerts_enabled"))
+            return results
+        finally:
+            conn.close()
 
     def log_call(
         self,
@@ -716,5 +962,169 @@ class CallLogger:
             """
             rows = conn.execute(sql, params).fetchall()
             return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_user_usage_rollups(
+        self,
+        start_at: str,
+        end_at: str,
+        user_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conditions = [
+                "cl.status = 'success'",
+                "cl.user_id IS NOT NULL",
+                "cl.created_at >= ?",
+                "cl.created_at < ?",
+            ]
+            params: list[Any] = [start_at, end_at]
+            if user_id is not None:
+                conditions.append("cl.user_id = ?")
+                params.append(str(user_id))
+
+            where_clause = "WHERE " + " AND ".join(conditions)
+            sql = f"""
+                SELECT
+                    CAST(cl.user_id AS INTEGER) as user_id,
+                    COALESCE(u.username, '') as username,
+                    COUNT(*) as call_count,
+                    COALESCE(SUM(cl.prompt_tokens), 0) as total_prompt_tokens,
+                    COALESCE(SUM(cl.completion_tokens), 0) as total_completion_tokens,
+                    COALESCE(SUM(cl.total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(cl.cached_input_tokens), 0) as cached_input_tokens,
+                    COALESCE(SUM(cl.cache_write_tokens), 0) as cache_write_tokens,
+                    COALESCE(SUM(cl.estimated_cost), 0) as estimated_cost,
+                    COALESCE(MAX(cl.billing_currency), 'CNY') as billing_currency,
+                    COALESCE(AVG(cl.duration_ms), 0) as avg_duration_ms
+                FROM call_logs cl
+                LEFT JOIN users u ON u.id = CAST(cl.user_id AS INTEGER)
+                {where_clause}
+                GROUP BY cl.user_id, u.username
+                ORDER BY estimated_cost DESC, total_tokens DESC, username ASC
+            """
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_model_usage_rollups(
+        self,
+        start_at: str,
+        end_at: str,
+        user_id: int,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    model,
+                    provider,
+                    provider_model,
+                    COUNT(*) as call_count,
+                    COALESCE(SUM(total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(estimated_cost), 0) as estimated_cost
+                FROM call_logs
+                WHERE status = 'success'
+                  AND user_id = ?
+                  AND created_at >= ?
+                  AND created_at < ?
+                GROUP BY model, provider, provider_model
+                ORDER BY estimated_cost DESC, total_tokens DESC, model ASC
+                LIMIT ?
+                """,
+                (str(user_id), start_at, end_at, int(limit)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def has_notification_event(self, event_key: str) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM notification_events WHERE event_key = ? LIMIT 1",
+                (event_key,),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def claim_notification_event(
+        self,
+        *,
+        event_key: str,
+        event_type: str,
+        user_id: int | None,
+        username: str | None,
+        event_date: str | None,
+        metric: str | None = None,
+        threshold_value: float | None = None,
+        observed_value: float | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            payload_json = json.dumps(payload, ensure_ascii=False) if payload is not None else None
+            conn.execute(
+                """
+                INSERT INTO notification_events (
+                    event_key, event_type, status, user_id, username, event_date, metric,
+                    threshold_value, observed_value, payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_key,
+                    event_type,
+                    "pending",
+                    str(user_id) if user_id is not None else None,
+                    username,
+                    event_date,
+                    metric,
+                    threshold_value,
+                    observed_value,
+                    payload_json,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        finally:
+            conn.close()
+
+    def update_notification_event(
+        self,
+        event_key: str,
+        *,
+        status: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            payload_json = json.dumps(payload, ensure_ascii=False) if payload is not None else None
+            conn.execute(
+                """
+                UPDATE notification_events
+                SET status = ?, payload = COALESCE(?, payload)
+                WHERE event_key = ?
+                """,
+                (status, payload_json, event_key),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_notification_event(self, event_key: str) -> None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("DELETE FROM notification_events WHERE event_key = ?", (event_key,))
+            conn.commit()
         finally:
             conn.close()
