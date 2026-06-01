@@ -10,7 +10,7 @@ venv/
 
 # 日志文件
 *.log
-logs/
+/logs/
 service.log
 
 # 数据库文件（已经通过volume挂载）
@@ -35,6 +35,10 @@ service.log
 Thumbs.db
 *.tmp
 *.temp
+
+# 前端本地依赖与构建产物
+frontend/node_modules/
+static/admin/
 
 # 本地配置
 .env

@@ -157,9 +157,17 @@ class CallLogger:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
+                token_version INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
         """)
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "token_version" not in existing:
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         
         # 用户路由表
         conn.execute("""
@@ -261,7 +269,7 @@ class CallLogger:
         try:
             row = conn.execute(
                 """
-                SELECT id, username, password_hash FROM users WHERE username = ?
+                SELECT id, username, password_hash, token_version FROM users WHERE username = ?
                 """,
                 (username,),
             ).fetchone()
@@ -275,11 +283,36 @@ class CallLogger:
         try:
             row = conn.execute(
                 """
-                SELECT id, username FROM users WHERE id = ?
+                SELECT id, username, token_version FROM users WHERE id = ?
                 """,
                 (user_id,),
             ).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def increment_user_token_version(self, user_id: int) -> int:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE users
+                SET token_version = token_version + 1
+                WHERE id = ?
+                """,
+                (user_id,),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("用户不存在")
+            row = cursor.execute(
+                "SELECT token_version FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("用户不存在")
+            conn.commit()
+            return int(row[0])
         finally:
             conn.close()
 

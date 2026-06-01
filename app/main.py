@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -79,6 +80,11 @@ app.add_middleware(
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount(
+    "/admin/assets",
+    StaticFiles(directory="static/admin/assets", check_dir=False),
+    name="admin_assets",
+)
 
 # 欢迎页
 @app.get("/", include_in_schema=False)
@@ -261,6 +267,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     user = call_logger.get_user_by_id(int(user_id))
     if user is None:
         raise credentials_exception
+    try:
+        token_version = int(payload.get("token_version", 0))
+        current_token_version = int(user.get("token_version", 0))
+    except (TypeError, ValueError):
+        raise credentials_exception
+    if token_version != current_token_version:
+        raise credentials_exception
     return user
 
 
@@ -316,6 +329,14 @@ def _normalize_model_names(models: list[str] | None) -> list[str]:
         normalized.append(candidate)
         seen.add(candidate)
     return normalized
+
+
+def _access_token_payload(user_id: int, username: str, token_version: int = 0) -> dict[str, Any]:
+    return {
+        "sub": str(user_id),
+        "username": username,
+        "token_version": token_version,
+    }
 
 
 def _is_default_route_model(model: str | None) -> bool:
@@ -1070,7 +1091,9 @@ async def register(user: UserCreate):
         return {
             "user_id": user_id,
             "username": user.username,
-            "access_token": create_access_token({"sub": str(user_id), "username": user.username}),
+            "access_token": create_access_token(
+                _access_token_payload(user_id, user.username)
+            ),
             "token_type": "bearer"
         }
     except ValueError as e:
@@ -1087,15 +1110,30 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token = create_access_token(
-        {"sub": str(user["id"]), "username": user["username"]}
+        _access_token_payload(
+            user["id"],
+            user["username"],
+            int(user.get("token_version", 0)),
+        )
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-# 管理后台页面
+# 管理后台页面（React SPA 构建产物）
 @app.get("/admin")
+@app.get("/admin/", include_in_schema=False)
 async def admin_page():
-    return FileResponse("static/admin.html")
+    admin_index = "static/admin/index.html"
+    if not os.path.isfile(admin_index):
+        return HTMLResponse(
+            content=(
+                "<h1>管理后台尚未构建</h1>"
+                "<p>请先运行 <code>npm ci --prefix frontend && "
+                "npm run build --prefix frontend</code> 生成 static/admin/。</p>"
+            ),
+            status_code=503,
+        )
+    return FileResponse(admin_index)
 
 
 # 管理API：获取全局路由列表（兼容旧版本）
@@ -1265,7 +1303,13 @@ async def delete_user_route(
 
 @app.get("/v1/user/token")
 async def get_user_token(current_user: dict = Depends(get_current_user)):
-    new_token = create_access_token({"sub": str(current_user["id"]), "username": current_user["username"]})
+    new_token = create_access_token(
+        _access_token_payload(
+            current_user["id"],
+            current_user["username"],
+            int(current_user.get("token_version", 0)),
+        )
+    )
     return {
         "access_token": new_token,
         "token_type": "bearer",
@@ -1275,7 +1319,14 @@ async def get_user_token(current_user: dict = Depends(get_current_user)):
 
 @app.post("/v1/user/token/regenerate")
 async def regenerate_user_token(current_user: dict = Depends(get_current_user)):
-    new_token = create_access_token({"sub": str(current_user["id"]), "username": current_user["username"]})
+    token_version = call_logger.increment_user_token_version(current_user["id"])
+    new_token = create_access_token(
+        _access_token_payload(
+            current_user["id"],
+            current_user["username"],
+            token_version,
+        )
+    )
     return {
         "access_token": new_token,
         "token_type": "bearer",

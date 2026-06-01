@@ -54,7 +54,7 @@ SQLite存储所有调用记录，包含调用时间、token使用量、耗时、
 - [ ] 数据模型：`users` 表增加 `role`（admin/user）或 `is_admin`；迁移策略：首个注册用户为 admin，或由环境变量指定管理员用户名
 - [ ] FastAPI：`require_admin` 依赖，校验 JWT 与库中角色一致
 - [ ] `GET /v1/admin/routes`、`GET /v1/admin/providers` 仅管理员可访问，普通用户返回 403
-- [ ] `static/admin.html`：非管理员隐藏「全局服务商/路由」或只读提示，与 API 行为一致
+- [ ] `frontend/` 管理后台：非管理员隐藏「全局服务商/路由」或只读提示，与 API 行为一致
 
 ### P2 — 计费 MVP
 
@@ -183,18 +183,30 @@ notifications:
 - 每日总结默认发送“上一自然日”的用量；用户可以在页面自定义每日发送时间，时区使用 `notifications.timezone`。
 - 同一用户同一天的日报、同一条阈值规则的预警都会写入 SQLite `notification_events` 去重，避免内置调度和 cron 同时运行时重复发送。
 
-### 3. 启动服务
+### 3. 构建管理后台（首次或修改前端后）
+```bash
+npm ci --prefix frontend
+npm run build --prefix frontend
+```
+需要 Node.js 20+。构建产物输出到 `static/admin/`，由 FastAPI 在 `/admin` 和 `/admin/` 提供。
+
+前端开发时可单独启动 Vite（API 代理到 8000）：
+```bash
+npm run dev --prefix frontend
+```
+
+### 4. 启动服务
 ```bash
 python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 4. 访问管理后台
+### 5. 访问管理后台
 浏览器打开 http://localhost:8000/admin
 - 注册账号并登录
 - 在「我的路由」页面添加你自己的私有路由
 - 可以在「调用日志」和「用量统计」页面查看调用记录和消费情况
 
-### 5. 调用测试
+### 6. 调用测试
 使用OpenAI SDK调用，只需在Header中添加你的Token即可：
 ```python
 from openai import OpenAI
@@ -210,7 +222,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-### 6. 外部 cron 触发通知（可选）
+### 7. 外部 cron 触发通知（可选）
 如果你不想依赖服务内置调度，也可以直接调用命令行入口：
 
 ```bash
@@ -497,8 +509,11 @@ GET /health
 │   ├── utils.py          # 工具函数（JWT、密码哈希）
 │   └── providers/
 │       └── base.py       # Provider适配层
+├── frontend/             # 管理后台源码（React + Vite + TypeScript）
+│   └── src/              # 页面、组件、API 客户端
 ├── static/
-│   └── admin.html        # 管理后台页面
+│   ├── admin/            # 前端构建产物（npm run build 生成）
+│   └── imgs/             # 静态图片资源
 ├── config.yaml           # 全局配置文件
 ├── requirements.txt
 ├── .gitignore

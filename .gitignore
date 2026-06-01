@@ -162,9 +162,11 @@ Thumbs.db
 
 # Project specific
 *.db
-logs/
+/logs/
 config.yaml
 *.sqlite3
 test.md
 test.json
-tests/
+tests/__pycache__/
+frontend/node_modules/
+static/admin/
