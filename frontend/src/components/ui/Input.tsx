@@ -28,9 +28,7 @@ export function Input({ label, hint, className, id, ...props }: InputProps) {
       />
       {hint ? (
         <p className="mt-1 min-h-[1.25rem] text-xs text-slate-500">{hint}</p>
-      ) : (
-        <p className="mt-1 min-h-[1.25rem]" aria-hidden="true" />
-      )}
+      ) : null}
     </div>
   );
 }

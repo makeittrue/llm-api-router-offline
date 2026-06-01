@@ -3,9 +3,10 @@ import type { SelectHTMLAttributes } from "react";
 
 interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   label?: string;
+  hint?: string;
 }
 
-export function Select({ label, className, id, children, ...props }: SelectProps) {
+export function Select({ label, hint, className, id, children, ...props }: SelectProps) {
   const selectId = id || label;
   return (
     <div>
@@ -27,7 +28,9 @@ export function Select({ label, className, id, children, ...props }: SelectProps
       >
         {children}
       </select>
-      <p className="mt-1 min-h-[1.25rem]" aria-hidden="true" />
+      {hint ? (
+        <p className="mt-1 min-h-[1.25rem] text-xs text-slate-500">{hint}</p>
+      ) : null}
     </div>
   );
 }

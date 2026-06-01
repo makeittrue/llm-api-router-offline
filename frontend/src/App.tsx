@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { getGlobalProviders, getLogSummary, getUserRoutes } from "@/api/services";
 import { Header, Sidebar } from "@/components/layout/AppShell";
 import { StatCards } from "@/components/layout/StatCards";
 import { LoginModal } from "@/components/modals/LoginModal";
@@ -10,7 +11,7 @@ import { ProvidersPage } from "@/features/providers/ProvidersPage";
 import { RoutesPage } from "@/features/routes/RoutesPage";
 import { useAuth } from "@/context/AuthContext";
 import type { DashboardStats, DefaultRouteConfig, TabId } from "@/types/api";
-import { formatTokens } from "@/utils/format";
+import { formatCurrencyTotals, formatTokens } from "@/utils/format";
 
 export default function App() {
   const { isAuthenticated } = useAuth();
@@ -24,6 +25,43 @@ export default function App() {
     totalCost: "-",
   });
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const fetchGlobalStats = async () => {
+      try {
+        const [summaryData, providersData, routesData] = await Promise.all([
+          getLogSummary(),
+          getGlobalProviders(),
+          getUserRoutes(),
+        ]);
+        
+        let totalCalls = 0;
+        let totalTokens = 0;
+        const currencyTotals: Record<string, number> = {};
+        summaryData.data.forEach((item) => {
+          totalCalls += item.call_count;
+          totalTokens += item.total_tokens || 0;
+          if (item.billing_currency) {
+            currencyTotals[item.billing_currency] =
+              (currencyTotals[item.billing_currency] || 0) +
+              Number(item.estimated_cost || 0);
+          }
+        });
+        
+        setStats({
+          routeCount: routesData.routes.length,
+          providerCount: providersData.providers.length,
+          totalCalls,
+          totalTokens,
+          totalCost: formatCurrencyTotals(currencyTotals),
+        });
+      } catch (e) {
+        console.error("Failed to load global stats", e);
+      }
+    };
+    fetchGlobalStats();
+  }, [isAuthenticated]);
 
   const handleRouteStats = useCallback(
     (routeCount: number, models: string[], defaultRoute: DefaultRouteConfig) => {
