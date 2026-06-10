@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -18,6 +19,13 @@ from pydantic import BaseModel, Field
 
 from app.utils import verify_password, get_password_hash, create_access_token, verify_token
 
+from app.anthropic_bridge import (
+    anthropic_sse_from_openai_sse,
+    anthropic_to_chat_request,
+    count_anthropic_tokens,
+    openai_error_to_anthropic,
+    openai_to_anthropic_response,
+)
 from app.config import AppConfig, load_config, ProviderConfig
 from app.logger import CallLogger, build_request_log_meta
 from app.models import ChatCompletionRequest, ModelListResponse
@@ -33,6 +41,8 @@ notification_scheduler_task: asyncio.Task | None = None
 notification_scheduler_stop: asyncio.Event | None = None
 DEFAULT_ROUTE_MODEL = "default"
 _FEISHU_RECEIVE_ID_TYPES = {"open_id", "user_id", "union_id", "email", "chat_id"}
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -252,9 +262,10 @@ async def health_check():
 
 # OAuth2 方案
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 
-# 鉴权依赖
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+
+def _user_from_access_token(token: str) -> dict[str, Any]:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="无法验证凭证",
@@ -277,6 +288,25 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     if token_version != current_token_version:
         raise credentials_exception
     return user
+
+
+# 鉴权依赖
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    return _user_from_access_token(token)
+
+
+async def get_current_user_flexible(
+    request: Request,
+    bearer_token: str | None = Depends(oauth2_scheme_optional),
+):
+    token = bearer_token or request.headers.get("x-api-key")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="无法验证凭证",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return _user_from_access_token(token)
 
 
 # 数据模型
@@ -569,17 +599,21 @@ def _resolve_models_to_try(
     return models_to_try, primary_resolve_error
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(
-    request: ChatCompletionRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    start_time = time.time()
+_STREAM_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
 
-    print(
-        "[DEBUG] chat/completions request:",
-        json.dumps(request.model_dump(mode="python", exclude_none=True), indent=2, ensure_ascii=False),
-    )
+
+async def _dispatch_chat_completion(
+    request: ChatCompletionRequest,
+    current_user: dict,
+    *,
+    start_time: float | None = None,
+) -> JSONResponse | StreamingResponse:
+    if start_time is None:
+        start_time = time.time()
 
     models_to_try, primary_resolve_error = _resolve_models_to_try(current_user["id"], request)
     if not models_to_try:
@@ -673,11 +707,7 @@ async def chat_completions(
                         user_id=current_user["id"],
                     ),
                     media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                        "X-Accel-Buffering": "no",
-                    },
+                    headers=_STREAM_HEADERS,
                 )
             except Exception as e:
                 last_error = e
@@ -688,11 +718,7 @@ async def chat_completions(
                 return StreamingResponse(
                     _sse_error_stream(last_error.body),
                     media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                        "X-Accel-Buffering": "no",
-                    },
+                    headers=_STREAM_HEADERS,
                 )
             else:
                 return StreamingResponse(
@@ -706,11 +732,7 @@ async def chat_completions(
                         }
                     ),
                     media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                        "X-Accel-Buffering": "no",
-                    },
+                    headers=_STREAM_HEADERS,
                 )
 
     last_error = None
@@ -794,6 +816,77 @@ async def chat_completions(
             }
         },
     )
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    request: ChatCompletionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    logger.debug("chat/completions request: %s", json.dumps(request.model_dump(mode="python", exclude_none=True), ensure_ascii=False))
+    return await _dispatch_chat_completion(request, current_user)
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(
+    raw_request: Request,
+    current_user: dict = Depends(get_current_user_flexible),
+):
+    body = await raw_request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400,
+            content=openai_error_to_anthropic(
+                {"error": {"message": "Invalid request body", "type": "invalid_request_error"}}
+            ),
+        )
+
+    requested_model = body.get("model") if isinstance(body.get("model"), str) else ""
+    try:
+        chat_request = anthropic_to_chat_request(body)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content=openai_error_to_anthropic(
+                {"error": {"message": str(e), "type": "invalid_request_error"}}
+            ),
+        )
+
+    logger.debug("anthropic /v1/messages request: %s", json.dumps(body, ensure_ascii=False))
+    result = await _dispatch_chat_completion(chat_request, current_user)
+
+    if isinstance(result, StreamingResponse):
+        async def anthropic_stream():
+            async for chunk in anthropic_sse_from_openai_sse(
+                result.body_iterator,
+                requested_model=requested_model,
+            ):
+                yield chunk
+
+        return StreamingResponse(
+            anthropic_stream(),
+            media_type="text/event-stream",
+            headers=_STREAM_HEADERS,
+        )
+
+    openai_body = json.loads(result.body.decode("utf-8"))
+    if result.status_code >= 400:
+        return JSONResponse(
+            status_code=result.status_code,
+            content=openai_error_to_anthropic(openai_body),
+        )
+    return JSONResponse(content=openai_to_anthropic_response(openai_body, requested_model=requested_model))
+
+
+@app.post("/v1/messages/count_tokens")
+async def anthropic_count_tokens(
+    raw_request: Request,
+    current_user: dict = Depends(get_current_user_flexible),
+):
+    body = await raw_request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"input_tokens": 0})
+    return count_anthropic_tokens(body)
 
 
 def _log_preview_text(text: str, max_total: int = 4000) -> str:

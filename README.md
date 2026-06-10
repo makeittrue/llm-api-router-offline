@@ -267,6 +267,85 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+## Claude Code 接入（Anthropic Messages API）
+
+Claude Code 默认使用 **Anthropic Messages API**（`POST /v1/messages`），不是 OpenAI 的 `/v1/chat/completions`。本项目已内置协议桥接：Claude Code 指向本网关后，网关会将 Anthropic 请求转换为 OpenAI 兼容格式，再转发到你在「我的路由」或 `config.yaml` 中配置的上游。
+
+### 1. 在本项目中先完成的准备
+
+1. 按上文启动网关，并打开管理后台 `http://<host>:<port>/admin`。
+2. **注册 / 登录**，复制登录接口返回的 **`access_token`**（即下文中的「网关 Token」）。
+3. 在 **「我的路由」** 添加私有路由，或依赖 `config.yaml` 中的 **全局路由**。Claude Code 里填写的 **模型名** 必须与网关对外暴露的 **`model` 字段** 完全一致。
+
+### 2. Claude Code 侧环境变量
+
+```bash
+export ANTHROPIC_BASE_URL="http://<网关主机>:<端口>"
+export ANTHROPIC_API_KEY="<你的网关 JWT Token>"
+claude
+```
+
+说明：
+
+- **`ANTHROPIC_BASE_URL`** 填网关根地址即可（例如 `http://localhost:8000`），**不要**加 `/v1`；Claude Code 会自动请求 `/v1/messages`。
+- **`ANTHROPIC_API_KEY`** 填管理后台登录后的 **JWT Token**，网关同时支持 `Authorization: Bearer` 与 **`x-api-key`** 两种鉴权方式。
+- 若希望 `/model` 选择器从网关拉取模型列表，可额外设置 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`（需配合 Claude Code 的 `availableModels` 白名单）。
+
+也可写入 `~/.claude/settings.json`：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8000",
+    "ANTHROPIC_API_KEY": "你的网关Token"
+  }
+}
+```
+
+### 3. 连接自检（推荐）
+
+```bash
+# 模型列表（Bearer 或 x-api-key 均可）
+curl -sS "http://localhost:8000/v1/models" \
+  -H "x-api-key: 你的网关Token" | head
+
+# Anthropic Messages 非流式
+curl -sS "http://localhost:8000/v1/messages" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: 你的网关Token" \
+  -d '{
+    "model": "你在网关配置的模型名",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+
+# Token 计数（Claude Code 启动时会调用）
+curl -sS "http://localhost:8000/v1/messages/count_tokens" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: 你的网关Token" \
+  -d '{
+    "model": "你在网关配置的模型名",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
+### 4. 常见问题
+
+- **401 / 鉴权失败**：`ANTHROPIC_API_KEY` 不是本系统 Token，或 Token 已过期；请重新登录管理后台获取。
+- **404 / 模型不存在**：Claude Code 中的模型名与路由配置不一致；用 `GET /v1/models` 核对 `id` 列表。
+- **工具调用异常**：网关会将 Anthropic 的 `tool_use` / `tool_result` 与 OpenAI 的 `tool_calls` / `tool` 消息互转；请确认上游支持 function calling。
+- **网关与 Claude Code 不在同一台机器**：`ANTHROPIC_BASE_URL` 不要用 `localhost`（除非同机运行）；应填网关所在机器的内网 IP 或域名。
+
+### 5. 协议说明
+
+| Claude Code 请求 | 网关行为 |
+|------------------|----------|
+| `POST /v1/messages` | 转为 OpenAI Chat Completions，走路由转发，响应再转回 Anthropic 格式 |
+| `POST /v1/messages/count_tokens` | 使用 tiktoken 估算输入 token（不可用时按字符数兜底） |
+| `GET /v1/models` | 已有接口，与 OpenAI 客户端共用 |
+
+流式响应会将 OpenAI SSE 转换为 Anthropic 的 `message_start` / `content_block_delta` / `message_stop` 事件序列，以兼容 Claude Code 的工具流式输入（`input_json_delta`）。
+
 ## Trae IDE 接入（自定义 OpenAI 兼容网关）
 
 Trae 在较新版本支持「自定义模型 / OpenAI 兼容服务商」等能力时，可以把 **Base URL** 指向本项目，从而在 IDE 内使用你在网关里配置的任意上游模型（含私有路由）。不同版本菜单位置可能略有差异，常见入口包括：**头像 → AI 与模型 / 模型管理 → 添加模型**，或聊天区域 **模型选择器 → 添加模型**。
@@ -406,6 +485,13 @@ POST /v1/chat/completions
 ```
 完全兼容OpenAI Chat Completions API格式，需要鉴权。
 
+### 3.1 Anthropic Messages（Claude Code）
+```
+POST /v1/messages
+POST /v1/messages/count_tokens
+```
+兼容 Anthropic Messages API，供 Claude Code 通过 `ANTHROPIC_BASE_URL` 接入。鉴权支持 `Authorization: Bearer` 或 `x-api-key` 请求头。详见上文「Claude Code 接入」。
+
 ### 4. 模型列表
 ```
 GET /v1/models
@@ -505,6 +591,7 @@ GET /health
 │   ├── config.py         # 配置加载
 │   ├── models.py         # 数据模型
 │   ├── router.py         # 路由调度
+│   ├── anthropic_bridge.py  # Claude Code / Anthropic Messages 协议桥接
 │   ├── logger.py         # 日志存储 + 数据库操作
 │   ├── utils.py          # 工具函数（JWT、密码哈希）
 │   └── providers/
