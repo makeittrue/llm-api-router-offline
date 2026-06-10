@@ -988,6 +988,7 @@ async def _stream_response(
     user_id: int,
 ):
     acc: dict = {"sse_data_events": 0, "sse_json_errors": 0}
+    _logged = False
     parser_buf = ""
     try:
         async for chunk in sse_chunks:
@@ -1087,6 +1088,7 @@ async def _stream_response(
             log_meta=log_meta,
             stream_usage=stream_usage,
         )
+        _logged = True
     except Exception as e:
         duration_ms = int((time.time() - start_time) * 1000)
         text, reason_len, preview = _stream_log_snapshot(acc)
@@ -1124,6 +1126,7 @@ async def _stream_response(
             log_meta=log_meta,
             stream_usage=stream_usage,
         )
+        _logged = True
         error_payload = {
             "error": {
                 "message": str(e),
@@ -1134,6 +1137,46 @@ async def _stream_response(
         error_data = json.dumps(error_payload, ensure_ascii=False)
         yield f"data: {error_data}\n\n".encode("utf-8")
         yield b"data: [DONE]\n\n"
+    finally:
+        if not _logged:
+            try:
+                duration_ms = int((time.time() - start_time) * 1000)
+                text, reason_len, preview = _stream_log_snapshot(acc)
+                usage = acc.get("usage")
+                stream_usage = None
+                if isinstance(usage, dict):
+                    stream_usage = {
+                        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(usage.get("completion_tokens") or 0),
+                        "total_tokens": int(usage.get("total_tokens") or 0),
+                    }
+                log_meta = {
+                    "request": build_request_log_meta(request),
+                    "stream": {
+                        "sse_data_events": acc.get("sse_data_events", 0),
+                        "sse_json_errors": acc.get("sse_json_errors", 0),
+                        "sse_parse_exceptions": acc.get("sse_parse_exceptions", 0),
+                        "upstream_response_id": acc.get("upstream_response_id"),
+                        "finish_reason": acc.get("finish_reason"),
+                        "usage_raw": usage,
+                        "assistant_text_chars": len(text),
+                        "assistant_reasoning_chars": reason_len,
+                    },
+                    "response_preview": preview or None,
+                    "stream_closed_early": True,
+                }
+                call_logger.log_call(
+                    request=request,
+                    provider_name=provider_name,
+                    provider_model=provider_model,
+                    duration_ms=duration_ms,
+                    status="success",
+                    user_id=user_id,
+                    log_meta=log_meta,
+                    stream_usage=stream_usage,
+                )
+            except Exception:
+                pass
 
 
 @app.get("/v1/logs")
