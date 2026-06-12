@@ -112,6 +112,7 @@ class CallLogger:
                 log_meta TEXT,
                 cached_input_tokens INTEGER DEFAULT 0,
                 cache_write_tokens INTEGER DEFAULT 0,
+                cache_hit_rate REAL DEFAULT 0,
                 estimated_cost REAL,
                 billing_currency TEXT,
                 billing_rule TEXT,
@@ -135,9 +136,11 @@ class CallLogger:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+        _cache_hit_rate_just_added = "cache_hit_rate" not in existing
         for column_name, column_type in (
             ("cached_input_tokens", "INTEGER DEFAULT 0"),
             ("cache_write_tokens", "INTEGER DEFAULT 0"),
+            ("cache_hit_rate", "REAL DEFAULT 0"),
             ("estimated_cost", "REAL"),
             ("billing_currency", "TEXT"),
             ("billing_rule", "TEXT"),
@@ -150,6 +153,16 @@ class CallLogger:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+
+        # 仅在 cache_hit_rate 列首次新增时回填旧记录
+        if _cache_hit_rate_just_added:
+            conn.execute("""
+                UPDATE call_logs
+                SET cache_hit_rate = ROUND(CAST(cached_input_tokens AS REAL) / prompt_tokens, 6)
+                WHERE cache_hit_rate = 0
+                  AND prompt_tokens > 0
+                  AND cached_input_tokens > 0
+            """)
         
         # 用户表
         conn.execute("""
@@ -806,6 +819,7 @@ class CallLogger:
             billing_rule: str | None = None
             cached_input_tokens = 0
             cache_write_tokens = 0
+            cache_hit_rate = 0.0
             estimated_cost: float | None = None
             if billing_result is not None:
                 billing_currency = billing_result.get("currency")
@@ -819,6 +833,9 @@ class CallLogger:
                 except (TypeError, ValueError) as e:
                     billing_meta_json = json.dumps({"_error": f"billing_meta 序列化失败: {e}"}, ensure_ascii=False)
 
+            if pt > 0 and cached_input_tokens > 0:
+                cache_hit_rate = round(cached_input_tokens / pt, 6)
+
             conn.execute(
                 """
                 INSERT INTO call_logs (
@@ -826,9 +843,10 @@ class CallLogger:
                     prompt_tokens, completion_tokens, total_tokens,
                     is_stream, status, error_message, user_id,
                     request_messages, created_at, duration_ms, log_meta,
-                    cached_input_tokens, cache_write_tokens, estimated_cost,
+                    cached_input_tokens, cache_write_tokens, cache_hit_rate,
+                    estimated_cost,
                     billing_currency, billing_rule, billing_meta
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -848,6 +866,7 @@ class CallLogger:
                     log_meta_json,
                     cached_input_tokens,
                     cache_write_tokens,
+                    cache_hit_rate,
                     estimated_cost,
                     billing_currency,
                     billing_rule,
@@ -942,6 +961,9 @@ class CallLogger:
                     SUM(total_tokens) as total_tokens,
                     SUM(cached_input_tokens) as cached_input_tokens,
                     SUM(cache_write_tokens) as cache_write_tokens,
+                    CASE WHEN SUM(prompt_tokens) > 0
+                         THEN ROUND(CAST(SUM(cached_input_tokens) AS REAL) / SUM(prompt_tokens), 6)
+                         ELSE 0 END as cache_hit_rate,
                     SUM(estimated_cost) as estimated_cost,
                     AVG(duration_ms) as avg_duration_ms,
                     'CNY' as billing_currency
@@ -985,6 +1007,9 @@ class CallLogger:
                     SUM(total_tokens) as total_tokens,
                     SUM(cached_input_tokens) as cached_input_tokens,
                     SUM(cache_write_tokens) as cache_write_tokens,
+                    CASE WHEN SUM(prompt_tokens) > 0
+                         THEN ROUND(CAST(SUM(cached_input_tokens) AS REAL) / SUM(prompt_tokens), 6)
+                         ELSE 0 END as cache_hit_rate,
                     SUM(estimated_cost) as estimated_cost_total,
                     AVG(COALESCE(estimated_cost, 0)) as avg_cost_per_call,
                     AVG(duration_ms) as avg_duration_ms
@@ -1029,6 +1054,9 @@ class CallLogger:
                     COALESCE(SUM(cl.total_tokens), 0) as total_tokens,
                     COALESCE(SUM(cl.cached_input_tokens), 0) as cached_input_tokens,
                     COALESCE(SUM(cl.cache_write_tokens), 0) as cache_write_tokens,
+                    CASE WHEN COALESCE(SUM(cl.prompt_tokens), 0) > 0
+                         THEN ROUND(CAST(COALESCE(SUM(cl.cached_input_tokens), 0) AS REAL) / SUM(cl.prompt_tokens), 6)
+                         ELSE 0 END as cache_hit_rate,
                     COALESCE(SUM(cl.estimated_cost), 0) as estimated_cost,
                     COALESCE(MAX(cl.billing_currency), 'CNY') as billing_currency,
                     COALESCE(AVG(cl.duration_ms), 0) as avg_duration_ms

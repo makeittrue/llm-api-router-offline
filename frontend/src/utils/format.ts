@@ -28,6 +28,12 @@ export function formatTokens(total: number): string {
   return String(total);
 }
 
+export function formatHitRate(value?: number): string {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num === 0) return "-";
+  return `${(num * 100).toFixed(1)}%`;
+}
+
 export function formatDateTime(value: string): string {
   return new Date(value).toLocaleString("zh-CN");
 }

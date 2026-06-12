@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/DataTable";
 import { useToast } from "@/context/ToastContext";
 import type { CallLog } from "@/types/api";
-import { formatCost, formatDateTime, parseJsonDisplay } from "@/utils/format";
+import { formatCost, formatDateTime, formatHitRate, parseJsonDisplay } from "@/utils/format";
 
 const PAGE_SIZE = 20;
 
@@ -102,6 +102,7 @@ export function LogsPage({ modelOptions }: LogsPageProps) {
                   <Th>模型</Th>
                   <Th>服务商</Th>
                   <Th>总 Token</Th>
+                  <Th>缓存命中率</Th>
                   <Th>费用</Th>
                   <Th>耗时 (ms)</Th>
                   <Th>状态</Th>
@@ -122,6 +123,7 @@ export function LogsPage({ modelOptions }: LogsPageProps) {
                       <Td className="font-medium text-slate-900">{log.model}</Td>
                       <Td>{log.provider || "-"}</Td>
                       <Td>{log.total_tokens || 0}</Td>
+                      <Td>{formatHitRate(log.cache_hit_rate)}</Td>
                       <Td>{formatCost(log.estimated_cost, log.billing_currency)}</Td>
                       <Td>{log.duration_ms || 0}</Td>
                       <Td>

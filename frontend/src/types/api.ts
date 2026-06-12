@@ -41,6 +41,9 @@ export interface CallLog {
   billing_currency?: string;
   duration_ms?: number;
   status: string;
+  cached_input_tokens?: number;
+  cache_write_tokens?: number;
+  cache_hit_rate?: number;
   request_messages?: string | unknown;
   log_meta?: string | unknown;
   billing_meta?: string | unknown;
@@ -58,6 +61,7 @@ export interface LogSummaryItem {
   total_prompt_tokens?: number;
   total_completion_tokens?: number;
   cached_input_tokens?: number;
+  cache_hit_rate?: number;
   total_tokens?: number;
   estimated_cost?: number;
   billing_currency?: string;

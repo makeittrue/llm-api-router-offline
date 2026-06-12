@@ -23,6 +23,7 @@ import type { LogSummaryItem } from "@/types/api";
 import {
   formatCost,
   formatCurrencyTotals,
+  formatHitRate,
   formatTokens,
   getMonthOptions,
 } from "@/utils/format";
@@ -183,6 +184,7 @@ export function ChartsPage({ onStatsChange }: ChartsPageProps) {
                     <Th>输入 Token</Th>
                     <Th>输出 Token</Th>
                     <Th>缓存命中 Token</Th>
+                    <Th>缓存命中率</Th>
                     <Th>总 Token</Th>
                     <Th>费用</Th>
                     <Th>平均耗时 (ms)</Th>
@@ -196,6 +198,7 @@ export function ChartsPage({ onStatsChange }: ChartsPageProps) {
                       <Td>{item.total_prompt_tokens || 0}</Td>
                       <Td>{item.total_completion_tokens || 0}</Td>
                       <Td>{item.cached_input_tokens || 0}</Td>
+                      <Td>{formatHitRate(item.cache_hit_rate)}</Td>
                       <Td>{formatTokens(item.total_tokens || 0)}</Td>
                       <Td>{formatCost(item.estimated_cost, item.billing_currency)}</Td>
                       <Td>{Math.round(item.avg_duration_ms || 0)}</Td>
