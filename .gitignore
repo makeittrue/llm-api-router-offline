@@ -171,3 +171,4 @@ tests/__pycache__/
 frontend/node_modules/
 static/admin/
 .codegraph/
+.trae/
