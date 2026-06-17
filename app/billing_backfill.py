@@ -15,6 +15,9 @@
 
     # 仅回补指定 provider_model（默认回补所有 estimated_cost IS NULL 的成功记录）
     python -m app.billing_backfill --provider-model glm-5.2
+
+    # 修复已回补但缓存列为 0 的记录（cached_input_tokens / cache_write_tokens / cache_hit_rate）
+    python -m app.billing_backfill --rescan-cache
 """
 from __future__ import annotations
 
@@ -74,11 +77,17 @@ def backfill(
     *,
     provider_model: str | None = None,
     dry_run: bool = False,
+    rescan_cache: bool = False,
 ) -> dict[str, int]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = _row_factory
 
-    where = "status = 'success' AND estimated_cost IS NULL"
+    if rescan_cache:
+        # 修复已回补（estimated_cost 有值）但缓存列为 0 的记录
+        where = ("status = 'success' AND estimated_cost IS NOT NULL "
+                 "AND cached_input_tokens = 0 AND cache_write_tokens = 0")
+    else:
+        where = "status = 'success' AND estimated_cost IS NULL"
     params: list[Any] = []
     if provider_model:
         where += " AND provider_model = ?"
@@ -92,8 +101,10 @@ def backfill(
     ).fetchall()
     conn.close()
 
-    stats = {"scanned": 0, "updated": 0, "skipped_no_rule": 0}
-    updates: list[tuple[float, str | None, str | None, str | None, int]] = []
+    stats = {"scanned": 0, "updated": 0, "skipped_no_rule": 0, "cache_fixed": 0}
+    # (estimated_cost, currency, billing_rule, billing_meta,
+    #  cached_input_tokens, cache_write_tokens, cache_hit_rate, id)
+    updates: list[tuple[float, str | None, str | None, str | None, int, int, float, int]] = []
 
     for row in rows:
         stats["scanned"] += 1
@@ -140,14 +151,28 @@ def backfill(
             billing_meta_json = json.dumps(result, ensure_ascii=False)
         except (TypeError, ValueError):
             billing_meta_json = json.dumps({"_error": "backfill 序列化失败"}, ensure_ascii=False)
-        updates.append((estimated_cost, currency, billing_rule, billing_meta_json, row["id"]))
+
+        new_cached = int(result.get("cached_input_tokens") or 0)
+        new_cache_write = int(result.get("cache_write_tokens") or 0)
+        new_cache_hit_rate = round(new_cached / pt, 6) if pt > 0 and new_cached > 0 else 0.0
+
+        old_cached = int(row.get("cached_input_tokens") or 0)
+        if new_cached != old_cached:
+            stats["cache_fixed"] += 1
+
+        updates.append((
+            estimated_cost, currency, billing_rule, billing_meta_json,
+            new_cached, new_cache_write, new_cache_hit_rate, row["id"],
+        ))
         stats["updated"] += 1
 
     if dry_run:
         print(f"[DRY-RUN] 扫描 {stats['scanned']} 条，将回写 {stats['updated']} 条，"
-              f"跳过(无匹配规则) {stats['skipped_no_rule']} 条")
-        for estimated_cost, currency, billing_rule, _, rid in updates[:10]:
-            print(f"  id={rid} cost={estimated_cost} currency={currency} rule={billing_rule}")
+              f"跳过(无匹配规则) {stats['skipped_no_rule']} 条，"
+              f"缓存列修正 {stats['cache_fixed']} 条")
+        for u in updates[:10]:
+            print(f"  id={u[7]} cost={u[0]} currency={u[1]} rule={u[2]} "
+                  f"cached={u[4]} cw={u[5]} hit_rate={u[6]}")
         if len(updates) > 10:
             print(f"  ... 其余 {len(updates) - 10} 条略")
         return stats
@@ -156,14 +181,17 @@ def backfill(
         conn = sqlite3.connect(db_path)
         conn.executemany(
             "UPDATE call_logs SET estimated_cost = ?, billing_currency = ?, "
-            "billing_rule = ?, billing_meta = ? WHERE id = ?",
+            "billing_rule = ?, billing_meta = ?, "
+            "cached_input_tokens = ?, cache_write_tokens = ?, cache_hit_rate = ? "
+            "WHERE id = ?",
             updates,
         )
         conn.commit()
         conn.close()
 
     print(f"[DONE] 扫描 {stats['scanned']} 条，回写 {stats['updated']} 条，"
-          f"跳过(无匹配规则) {stats['skipped_no_rule']} 条")
+          f"跳过(无匹配规则) {stats['skipped_no_rule']} 条，"
+          f"缓存列修正 {stats['cache_fixed']} 条")
     return stats
 
 
@@ -174,6 +202,8 @@ def main() -> int:
     parser.add_argument("--provider-model", default=None,
                         help="仅回补指定 provider_model（默认全部 estimated_cost IS NULL 的成功记录）")
     parser.add_argument("--dry-run", action="store_true", help="只打印不写库")
+    parser.add_argument("--rescan-cache", action="store_true",
+                        help="修复已回补但缓存列(cached_input_tokens/cache_write_tokens/cache_hit_rate)为 0 的记录")
     args = parser.parse_args()
 
     app_config = load_config(args.config_path)
@@ -191,6 +221,7 @@ def main() -> int:
         billing_config=app_config.billing,
         provider_model=args.provider_model,
         dry_run=args.dry_run,
+        rescan_cache=args.rescan_cache,
     )
     return 0
 
