@@ -1204,6 +1204,17 @@ async def get_logs_summary(
     return {"data": summary}
 
 
+@app.get("/v1/logs/{log_id}")
+async def get_log_detail(
+    log_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    log = call_logger.get_log_detail(log_id=log_id, user_id=current_user["id"])
+    if log is None:
+        return JSONResponse(status_code=404, content={"detail": "日志不存在"})
+    return {"data": log}
+
+
 @app.get("/v1/billing/summary")
 async def get_billing_summary(
     model: str | None = None,

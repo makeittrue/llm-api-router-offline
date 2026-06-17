@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { getLogs } from "@/api/services";
+import { getLogDetail, getLogs } from "@/api/services";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
@@ -29,6 +29,27 @@ export function LogsPage({ modelOptions }: LogsPageProps) {
   const [model, setModel] = useState("");
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [detailCache, setDetailCache] = useState<Record<number, CallLog>>({});
+  const [loadingDetailId, setLoadingDetailId] = useState<number | null>(null);
+
+  const handleRowClick = async (logId: number) => {
+    if (expandedId === logId) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(logId);
+    if (!detailCache[logId]) {
+      setLoadingDetailId(logId);
+      try {
+        const resp = await getLogDetail(logId);
+        setDetailCache((prev) => ({ ...prev, [logId]: resp.data }));
+      } catch {
+        // ignore detail load error
+      } finally {
+        setLoadingDetailId(null);
+      }
+    }
+  };
 
   const loadLogs = async (nextPage = page, nextModel = model) => {
     setLoading(true);
@@ -113,11 +134,7 @@ export function LogsPage({ modelOptions }: LogsPageProps) {
                   <Fragment key={log.id}>
                     <tr
                       className="cursor-pointer hover:bg-slate-50/80"
-                      onClick={() =>
-                        setExpandedId((current) =>
-                          current === log.id ? null : log.id,
-                        )
-                      }
+                      onClick={() => handleRowClick(log.id)}
                     >
                       <Td>{formatDateTime(log.created_at)}</Td>
                       <Td className="font-medium text-slate-900">{log.model}</Td>
@@ -135,26 +152,30 @@ export function LogsPage({ modelOptions }: LogsPageProps) {
                     {expandedId === log.id ? (
                       <tr key={`${log.id}-detail`} className="bg-slate-50">
                         <Td colSpan={7}>
-                          <div className="grid grid-cols-1 gap-4 py-2 lg:grid-cols-3">
-                            <DetailBlock
-                              title="请求消息"
-                              content={parseJsonDisplay(log.request_messages)}
-                            />
-                            <DetailBlock
-                              title="排查信息"
-                              content={parseJsonDisplay(log.log_meta)}
-                            />
-                            <div className="space-y-3">
+                          {loadingDetailId === log.id && !detailCache[log.id] ? (
+                            <div className="py-2 text-sm text-slate-500">加载详情中...</div>
+                          ) : (
+                            <div className="grid grid-cols-1 gap-4 py-2 lg:grid-cols-3">
                               <DetailBlock
-                                title="计费信息"
-                                content={parseJsonDisplay(log.billing_meta)}
+                                title="请求消息"
+                                content={parseJsonDisplay(detailCache[log.id]?.request_messages)}
                               />
                               <DetailBlock
-                                title="错误信息"
-                                content={log.error_message || "-"}
+                                title="排查信息"
+                                content={parseJsonDisplay(detailCache[log.id]?.log_meta)}
                               />
+                              <div className="space-y-3">
+                                <DetailBlock
+                                  title="计费信息"
+                                  content={parseJsonDisplay(detailCache[log.id]?.billing_meta)}
+                                />
+                                <DetailBlock
+                                  title="错误信息"
+                                  content={log.error_message || "-"}
+                                />
+                              </div>
                             </div>
-                          </div>
+                          )}
                         </Td>
                       </tr>
                     ) : null}

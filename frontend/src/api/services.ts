@@ -1,5 +1,6 @@
 import { fetchJson } from "./client";
 import type {
+  CallLog,
   DefaultRouteConfig,
   FeishuNotificationSettings,
   GlobalProvider,
@@ -73,6 +74,10 @@ export async function getLogs(params: {
   });
   if (params.model) search.set("model", params.model);
   return fetchJson<LogsResponse>(`/v1/logs?${search.toString()}`);
+}
+
+export async function getLogDetail(logId: number) {
+  return fetchJson<{ data: CallLog }>(`/v1/logs/${logId}`);
 }
 
 export async function getLogSummary(month?: string) {

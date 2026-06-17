@@ -900,7 +900,13 @@ class CallLogger:
             
             where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
             sql = f"""
-                SELECT * FROM call_logs
+                SELECT id, request_id, model, provider, provider_model,
+                       prompt_tokens, completion_tokens, total_tokens,
+                       is_stream, status, error_message, user_id,
+                       created_at, duration_ms,
+                       cached_input_tokens, cache_write_tokens, cache_hit_rate,
+                       estimated_cost, billing_currency, billing_rule
+                FROM call_logs
                 {where_clause}
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
@@ -930,6 +936,26 @@ class CallLogger:
             sql = f"SELECT COUNT(*) FROM call_logs {where_clause}"
             row = conn.execute(sql, params).fetchone()
             return int(row[0]) if row and row[0] is not None else 0
+        finally:
+            conn.close()
+
+    def get_log_detail(
+        self,
+        log_id: int,
+        user_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conditions = ["id = ?"]
+            params: list[Any] = [log_id]
+            if user_id:
+                conditions.append("user_id = ?")
+                params.append(str(user_id))
+            where_clause = "WHERE " + " AND ".join(conditions)
+            sql = f"SELECT * FROM call_logs {where_clause}"
+            row = conn.execute(sql, params).fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()
 
