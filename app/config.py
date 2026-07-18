@@ -141,7 +141,7 @@ class ContextConfig(BaseModel):
     max_tokens_default: int = Field(default=4096, ge=1)
     max_tokens_cap: int = Field(default=8192, ge=1)
 
-    # 请求 model 名（小写）包含任一子串时，改用下列上限（适配约 1M 上下文类模型，如 DeepSeek V4、MiMo 2.5）
+    # 请求 model 名（小写）包含任一子串时，改用下列上限（适配约 1M 上下文类模型，如 DeepSeek V4、MiMo 2.5、Kimi K3）
     long_context_model_substrings: list[str] = Field(
         default_factory=lambda: [
             "deepseek-v4",
@@ -151,6 +151,9 @@ class ContextConfig(BaseModel):
             "mimo_2.5",
             "mimo2.5",
             "mimo-v2.5",
+            "kimi-k3",
+            "kimi_k3",
+            "kimi k3",
         ]
     )
     long_context_message_char_cap: int = Field(default=800_000, ge=0)
