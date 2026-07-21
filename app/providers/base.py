@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -8,6 +9,19 @@ import httpx
 
 from app.config import ProviderConfig
 from app.models import ChatCompletionRequest
+
+# 生产环境默认关闭 payload DEBUG 输出：请求体（含 system prompt / 工具定义）会打到容器日志，
+# 既可能撑爆磁盘导致间歇性无响应，也会泄露用户隐私。需要排查时设置 LLM_ROUTER_DEBUG_PAYLOAD=1
+_DEBUG_PAYLOAD = os.getenv("LLM_ROUTER_DEBUG_PAYLOAD", "").lower() in ("1", "true", "yes")
+
+
+def _debug(msg: str = "", obj: Any = None) -> None:
+    if not _DEBUG_PAYLOAD:
+        return
+    if obj is not None:
+        print(json.dumps(obj, indent=2, ensure_ascii=False))
+    elif msg:
+        print(msg)
 
 # Trae / Cursor 等会通过 OpenAI SDK 附带大量非标准字段；Pydantic extra 会原样转发，
 # 自建 MiMo / vLLM 等严格校验时常见 400「Param Incorrect」。仅转发 OpenAI Chat 标准键。
@@ -456,21 +470,21 @@ class OpenAICompatibleProvider(BaseProvider):
                     )
                     payload["stream"] = False
 
-                    print(f"[DEBUG] Sending to {url} payload:")
-                    print(json.dumps(payload, indent=2, ensure_ascii=False))
-                    print("[DEBUG] Payload summary:")
-                    print(json.dumps(_debug_payload_summary(payload), indent=2, ensure_ascii=False))
+                    _debug(f"[DEBUG] Sending to {url} payload:")
+                    _debug(obj=payload)
+                    _debug("[DEBUG] Payload summary:")
+                    _debug(obj=_debug_payload_summary(payload))
 
                     resp = await client.post(url, headers=headers, json=payload)
-                    print(f"[DEBUG] Response status: {resp.status_code}")
+                    _debug(f"[DEBUG] Response status: {resp.status_code}")
                     if resp.status_code < 400:
                         return resp.json()
 
-                    print(f"[DEBUG] Error response content: {resp.text}")
+                    _debug(f"[DEBUG] Error response content: {resp.text}")
                     err = UpstreamError.from_httpx_response(resp)
                     retryable = attempt == 0 and _needs_reasoning_echo_retry(err.body)
                     if retryable:
-                        print("[DEBUG] Retrying with assistant reasoning_content padding")
+                        _debug("[DEBUG] Retrying with assistant reasoning_content padding")
                         force_reasoning_echo_pad = True
                         continue
                     raise err
@@ -497,21 +511,21 @@ class OpenAICompatibleProvider(BaseProvider):
                     )
                     payload["stream"] = True
 
-                    print(f"[DEBUG] Sending stream to {url} payload:")
-                    print(json.dumps(payload, indent=2, ensure_ascii=False))
-                    print("[DEBUG] Stream payload summary:")
-                    print(json.dumps(_debug_payload_summary(payload), indent=2, ensure_ascii=False))
+                    _debug(f"[DEBUG] Sending stream to {url} payload:")
+                    _debug(obj=payload)
+                    _debug("[DEBUG] Stream payload summary:")
+                    _debug(obj=_debug_payload_summary(payload))
 
                     async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                        print(f"[DEBUG] Stream response status: {resp.status_code}")
+                        _debug(f"[DEBUG] Stream response status: {resp.status_code}")
                         if resp.status_code >= 400:
                             buf = await resp.aread()
                             text = buf.decode("utf-8", errors="replace")
-                            print(f"[DEBUG] Stream error response content: {text}")
+                            _debug(f"[DEBUG] Stream error response content: {text}")
                             err = UpstreamError.from_text(resp.status_code, text)
                             retryable = attempt == 0 and _needs_reasoning_echo_retry(err.body)
                             if retryable:
-                                print("[DEBUG] Retrying stream with assistant reasoning_content padding")
+                                _debug("[DEBUG] Retrying stream with assistant reasoning_content padding")
                                 force_reasoning_echo_pad = True
                                 continue
                             raise err
