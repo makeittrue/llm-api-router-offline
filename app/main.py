@@ -26,6 +26,13 @@ from app.anthropic_bridge import (
     openai_error_to_anthropic,
     openai_to_anthropic_response,
 )
+from app.responses_bridge import (
+    extract_echo_fields,
+    openai_error_to_responses,
+    openai_to_responses_response,
+    responses_sse_from_openai_sse,
+    responses_to_chat_request,
+)
 from app.config import AppConfig, load_config, ProviderConfig
 from app.logger import CallLogger, build_request_log_meta
 from app.models import ChatCompletionRequest, ModelListResponse
@@ -887,6 +894,66 @@ async def anthropic_count_tokens(
     if not isinstance(body, dict):
         return JSONResponse(status_code=400, content={"input_tokens": 0})
     return count_anthropic_tokens(body)
+
+
+@app.post("/v1/responses")
+async def responses_api(
+    raw_request: Request,
+    current_user: dict = Depends(get_current_user_flexible),
+):
+    """OpenAI Responses API 入站端点（供 Codex 等客户端接入）。
+
+    内部转为 Chat Completions，经既有路由/日志/计费链路转发到任意上游，
+    响应再转回 Responses 格式。无状态（store / previous_response_id 不支持）。
+    """
+    body = await raw_request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400,
+            content=openai_error_to_responses(
+                {"error": {"message": "Invalid request body", "type": "invalid_request_error"}}
+            ),
+        )
+
+    requested_model = body.get("model") if isinstance(body.get("model"), str) else ""
+    echo = extract_echo_fields(body)
+    try:
+        chat_request = responses_to_chat_request(body)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content=openai_error_to_responses(
+                {"error": {"message": str(e), "type": "invalid_request_error"}}
+            ),
+        )
+
+    logger.debug("responses /v1/responses request: %s", json.dumps(body, ensure_ascii=False))
+    result = await _dispatch_chat_completion(chat_request, current_user)
+
+    if isinstance(result, StreamingResponse):
+        async def responses_stream():
+            async for chunk in responses_sse_from_openai_sse(
+                result.body_iterator,
+                requested_model=requested_model,
+                echo=echo,
+            ):
+                yield chunk
+
+        return StreamingResponse(
+            responses_stream(),
+            media_type="text/event-stream",
+            headers=_STREAM_HEADERS,
+        )
+
+    openai_body = json.loads(result.body.decode("utf-8"))
+    if result.status_code >= 400:
+        return JSONResponse(
+            status_code=result.status_code,
+            content=openai_error_to_responses(openai_body),
+        )
+    return JSONResponse(
+        content=openai_to_responses_response(openai_body, requested_model=requested_model, echo=echo)
+    )
 
 
 def _log_preview_text(text: str, max_total: int = 4000) -> str:

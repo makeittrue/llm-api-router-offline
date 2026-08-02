@@ -346,6 +346,53 @@ curl -sS "http://localhost:8000/v1/messages/count_tokens" \
 
 流式响应会将 OpenAI SSE 转换为 Anthropic 的 `message_start` / `content_block_delta` / `message_stop` 事件序列，以兼容 Claude Code 的工具流式输入（`input_json_delta`）。
 
+## Codex 接入（OpenAI Responses API）
+
+Codex 默认使用 **OpenAI Responses API**（`POST /v1/responses`），而非 `/v1/chat/completions`。本项目已内置协议桥接：Codex 指向本网关后，网关将 Responses 请求转换为 OpenAI Chat Completions，转发到你在「我的路由」或 `config.yaml` 中配置的任意上游（DeepSeek / Qwen / Kimi 等），响应再转回 Responses 格式。上游侧无需改动。
+
+### 1. 准备
+
+1. 启动网关并打开管理后台 `http://<host>:<port>/admin`。
+2. **注册 / 登录**，复制 `access_token`（即「网关 Token」）。Codex 里的 API Key 应与此 Token 一致（`Authorization: Bearer <Token>`，也接受 `x-api-key`）。
+3. 在「我的路由」添加私有路由，或依赖 `config.yaml` 中的全局路由。Codex 里选用的**模型名**必须与网关对外暴露的 `model` 字段完全一致（区分大小写）。
+
+### 2. 调用示例
+
+```bash
+# 非流式
+curl http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer 你的Token" \
+  -d '{
+    "model": "你在网关配置的模型名",
+    "instructions": "You are a helpful assistant.",
+    "input": "Hi, how are you?"
+  }'
+
+# 流式（响应以 response.created / response.output_text.delta / response.completed 等 SSE 事件返回）
+curl http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer 你的Token" \
+  -d '{
+    "model": "你在网关配置的模型名",
+    "input": "Hi, how are you?",
+    "stream": true
+  }'
+```
+
+### 3. 兼容性说明
+
+- 网关桥接为**无状态**：`store` 恒为 `false`，`previous_response_id` / `conversation` 不支持（与 DeepSeek Responses API 行为一致）。
+- `input`（字符串或输入 item 列表）、`instructions`、`stream`、`temperature`、`top_p`、`max_output_tokens`、`tools`（function）、`tool_choice`、`text.format`、`user` 均支持；不支持的参数静默忽略。
+- `reasoning.effort` 当前不透传到 Chat 上游（上游使用默认思考预算）；`web_search` / `file_search` / `code_interpreter` 等内置工具不映射，**function calling 完整支持**。
+- 思考链模型（如 DeepSeek-reasoner / MiMo thinking）的 `reasoning_content` 会转为 `reasoning` output item 与 `response.reasoning_text.delta` 事件。
+- 流式事件序列对齐 OpenAI / DeepSeek Responses API：`response.created` → `response.in_progress` → `response.output_item.added` → `response.content_part.added` → `response.output_text.delta` / `response.reasoning_text.delta` / `response.function_call_arguments.delta` → `...done` → `response.output_item.done` → `response.completed`（失败时为 `response.failed`），每个事件携带递增 `sequence_number`。
+- 路由解析、调用日志、计费与 `/v1/chat/completions` 完全一致，自动复用。
+
+### 4. Codex 侧配置
+
+将 Codex 的 base_url 指向网关（如 `http://<host>:<port>/v1`），API key 填网关 Token，model 填网关对外模型名。Codex 走 Responses API，请求会落到网关的 `/v1/responses` 端点。
+
 ## Trae IDE 接入（自定义 OpenAI 兼容网关）
 
 Trae 在较新版本支持「自定义模型 / OpenAI 兼容服务商」等能力时，可以把 **Base URL** 指向本项目，从而在 IDE 内使用你在网关里配置的任意上游模型（含私有路由）。不同版本菜单位置可能略有差异，常见入口包括：**头像 → AI 与模型 / 模型管理 → 添加模型**，或聊天区域 **模型选择器 → 添加模型**。
