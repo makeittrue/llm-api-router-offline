@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import zlib
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator
 
@@ -412,11 +413,18 @@ class OpenAICompatibleProvider(BaseProvider):
         base = self.config.base_url.rstrip("/")
         return f"{base}{path}"
 
-    def _build_headers(self) -> dict[str, str]:
-        return {
+    def _build_headers(self, *, for_stream: bool = False) -> dict[str, str]:
+        headers = {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
+        if for_stream:
+            # 禁止上游对流式响应做 gzip：SSE 长流一旦在传输中被截断/损坏，
+            # 本网关 httpx 解压会抛 "error decoding response body ..."，
+            # 客户端（Trae）会显示为 Stream error: ... Transport error: error decoding response body (origin: downstream)。
+            # SSE 本身就是小分片文本，gzip 收益可忽略；非流式大响应仍保留上游 gzip。
+            headers["Accept-Encoding"] = "identity"
+        return headers
 
     def _build_payload(
         self,
@@ -498,7 +506,7 @@ class OpenAICompatibleProvider(BaseProvider):
         self, request: ChatCompletionRequest, provider_model: str
     ) -> AsyncIterator[bytes]:
         url = self._build_url("/chat/completions")
-        headers = self._build_headers()
+        headers = self._build_headers(for_stream=True)
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 force_reasoning_echo_pad = False
@@ -531,8 +539,16 @@ class OpenAICompatibleProvider(BaseProvider):
                             raise err
 
                         # 必须用 aiter_bytes：aiter_raw 为未解压的 gzip/deflate，直接转发会导致客户端 SSE 解码失败
-                        async for chunk in resp.aiter_bytes():
-                            yield chunk
+                        # 即便已请求 identity，个别上游/中间代理仍可能返回损坏或截断的压缩数据。
+                        # 用普通异常（而非 UpstreamError）携带清晰文本：UpstreamError.__str__ 是整个 JSON 错误体，
+                        # 流中段经 _stream_response 转发时会变成嵌套 JSON，客户端不可读。
+                        try:
+                            async for chunk in resp.aiter_bytes():
+                                yield chunk
+                        except (httpx.HTTPError, zlib.error) as e:
+                            raise RuntimeError(
+                                f"上游流式响应传输/解码失败（连接可能被截断）: {e}"
+                            ) from e
                         return
         except UpstreamError:
             raise

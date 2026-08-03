@@ -388,6 +388,7 @@ curl http://localhost:8000/v1/responses \
 - 思考链模型（如 DeepSeek-reasoner / MiMo thinking）的 `reasoning_content` 会转为 `reasoning` output item 与 `response.reasoning_text.delta` 事件。
 - 流式事件序列对齐 OpenAI / DeepSeek Responses API：`response.created` → `response.in_progress` → `response.output_item.added` → `response.content_part.added` → `response.output_text.delta` / `response.reasoning_text.delta` / `response.function_call_arguments.delta` → `...done` → `response.output_item.done` → `response.completed`（失败时为 `response.failed`），每个事件携带递增 `sequence_number`。
 - 路由解析、调用日志、计费与 `/v1/chat/completions` 完全一致，自动复用。
+- DeepSeek 官方备注（2026-08）：官方 Responses API 目前仅支持 `deepseek-v4-flash`，暂不支持 `deepseek-v4-pro`，预计 2026 年 8 月初开放。本网关桥接不受此限制——它始终把 Responses 请求转为 Chat Completions 再转发上游；仅当绕过网关直接调用 DeepSeek 官方 `/responses` 端点时才需留意。
 
 ### 4. Codex 侧配置
 
@@ -465,6 +466,46 @@ routes:
     provider: 对应的服务商名称（和上面provider的name对应）
     provider_model: 服务商侧的实际模型名（可选，和model相同可以省略）
 ```
+
+### 计费配置（可选 `billing`）
+
+网关可基于 `call_logs` 按规则估算每次调用的费用（默认按每 1M token 计费，单位由 `unit` 指定）。规则按 `provider` + `provider_model_patterns` 匹配，支持 `token_tiers`（按输入 token 分档）与 `time_windows`（按时段/日期覆盖价格），`time_windows` 命中后覆盖基础价格并记录在日志的 `matched_window` 中。
+
+**DeepSeek 峰谷定价备注（2026-08）**：DeepSeek API 即将采用峰谷定价，**高峰时段价格为平时的 2 倍，适用所有计费项**；高峰时段定义为**北京时间每日 9:00～12:00 和 14:00～18:00**（具体生效时间以官方正式通知为准）。可通过 `time_windows` 配置实现，例如：
+
+```yaml
+billing:
+  enabled: true
+  default_currency: "CNY"
+  rules:
+    - provider: "deepseek"
+      provider_aliases: ["deepseek"]
+      provider_model_patterns: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"]
+      match_mode: "exact"
+      input_price: 1.0
+      output_price: 2.0
+      cache_read_price: 0.02
+      cache_write_price: 1.0
+      time_windows:
+        - name: "peak-9-12"
+          timezone: "Asia/Shanghai"
+          start_time: "09:00"
+          end_time: "12:00"
+          input_price: 2.0
+          output_price: 4.0
+          cache_read_price: 0.04
+          cache_write_price: 2.0
+        - name: "peak-14-18"
+          timezone: "Asia/Shanghai"
+          start_time: "14:00"
+          end_time: "18:00"
+          input_price: 2.0
+          output_price: 4.0
+          cache_read_price: 0.04
+          cache_write_price: 2.0
+```
+
+`time_windows` 支持 `timezone`（默认 UTC，建议 `Asia/Shanghai`）、`start_time`/`end_time`（每日起止）、`start_at`/`end_at`（日期区间）、`weekdays`（星期限定）；同一规则内从上到下匹配首个命中的窗口。完整字段说明以 `app/config.py` 中 `BillingConfig` 为准。
 
 ### 上下文与长窗口模型（可选 `context`）
 

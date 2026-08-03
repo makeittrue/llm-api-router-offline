@@ -1,6 +1,9 @@
 fastapi
 uvicorn
 httpx
+# 1.0.0 起 GZipMiddleware 默认跳过 text/event-stream；旧版本会对 SSE 做 gzip，
+# 客户端（Trae）在长流异常时会报 "error decoding response body (origin: downstream)"
+starlette>=1.0.0
 pyyaml
 pydantic
 aiosqlite
