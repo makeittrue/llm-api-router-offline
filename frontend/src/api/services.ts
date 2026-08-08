@@ -6,9 +6,14 @@ import type {
   GlobalProvider,
   LogSummaryItem,
   LogsResponse,
+  MeInfo,
   ProviderOption,
   UserRoute,
 } from "@/types/api";
+
+export async function getMe() {
+  return fetchJson<MeInfo>("/v1/me");
+}
 
 export async function getUserRoutes() {
   return fetchJson<{ routes: UserRoute[] }>("/v1/user/routes");

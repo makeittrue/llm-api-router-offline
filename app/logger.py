@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 from app.billing import calculate_request_cost
 from app.config import BillingConfig
 from app.models import ChatCompletionRequest, ChatCompletionResponse
+from app.utils import data_key_configured, decrypt_secret, encrypt_secret, mask_api_key
 
 # SQLite / 内存：超大 messages 或不可序列化对象会导致 log_call 抛错，进而让流式响应末尾变成 HTTP 500
 _MAX_LOG_JSON_CHARS = 512_000
@@ -171,6 +173,7 @@ class CallLogger:
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 token_version INTEGER NOT NULL DEFAULT 0,
+                role TEXT NOT NULL DEFAULT 'user',
                 created_at TEXT NOT NULL
             )
         """)
@@ -181,7 +184,31 @@ class CallLogger:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
-        
+        if "role" not in existing:
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+        # 管理员引导：环境变量指定管理员用户名；未指定且尚无任何管理员时，
+        # 提升最早注册的用户为管理员（等价于「首个注册用户为 admin」）。
+        env_admin = (os.getenv("LLM_ROUTER_ADMIN_USERNAME") or "").strip()
+        if env_admin:
+            # 与 _default_role_for 的判定保持一致：用户名大小写不敏感
+            conn.execute(
+                "UPDATE users SET role = 'admin' WHERE LOWER(username) = LOWER(?)",
+                (env_admin,),
+            )
+        else:
+            admin_count = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+            ).fetchone()[0]
+            if admin_count == 0:
+                conn.execute(
+                    "UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users)"
+                )
+
         # 用户路由表
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_routes (
@@ -200,6 +227,18 @@ class CallLogger:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_user_routes_user_id ON user_routes(user_id)
         """)
+
+        # 存量明文 API Key 一次性加密迁移（仅当配置了 ROUTER_DATA_KEY 时执行；
+        # Fernet 密文统一以 gAAAAA 开头，可用作「是否已加密」的判定）。
+        if data_key_configured():
+            for row_id, raw_key in conn.execute(
+                "SELECT id, provider_api_key FROM user_routes WHERE provider_api_key IS NOT NULL"
+            ).fetchall():
+                if raw_key and not raw_key.startswith("gAAAAA"):
+                    conn.execute(
+                        "UPDATE user_routes SET provider_api_key = ? WHERE id = ?",
+                        (encrypt_secret(raw_key), row_id),
+                    )
 
         # 用户 default 自动降级链配置
         conn.execute("""
@@ -258,16 +297,32 @@ class CallLogger:
         conn.close()
         
     # ========== 用户相关方法 ==========
-    def create_user(self, username: str, password_hash: str) -> int:
+    @staticmethod
+    def _default_role_for(username: str, user_count: int) -> str:
+        """注册时的默认角色。
+
+        - 设置了 LLM_ROUTER_ADMIN_USERNAME 时：仅命中该用户名的用户为 admin，
+          其余一律 user（此时「首个注册用户为 admin」规则不再生效）。
+        - 未设置时：系统首个注册用户自动成为 admin。
+        """
+        env_admin = (os.getenv("LLM_ROUTER_ADMIN_USERNAME") or "").strip()
+        if env_admin:
+            return "admin" if username.strip().lower() == env_admin.lower() else "user"
+        return "admin" if user_count == 0 else "user"
+
+    def create_user(self, username: str, password_hash: str, role: str | None = None) -> int:
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.cursor()
+            if role is None:
+                user_count = cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                role = self._default_role_for(username, user_count)
             cursor.execute(
                 """
-                INSERT INTO users (username, password_hash, created_at)
-                VALUES (?, ?, ?)
+                INSERT INTO users (username, password_hash, role, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (username, password_hash, datetime.now(timezone.utc).isoformat()),
+                (username, password_hash, role, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
             return cursor.lastrowid
@@ -282,7 +337,7 @@ class CallLogger:
         try:
             row = conn.execute(
                 """
-                SELECT id, username, password_hash, token_version FROM users WHERE username = ?
+                SELECT id, username, password_hash, token_version, role FROM users WHERE username = ?
                 """,
                 (username,),
             ).fetchone()
@@ -296,7 +351,7 @@ class CallLogger:
         try:
             row = conn.execute(
                 """
-                SELECT id, username, token_version FROM users WHERE id = ?
+                SELECT id, username, token_version, role FROM users WHERE id = ?
                 """,
                 (user_id,),
             ).fetchone()
@@ -335,7 +390,7 @@ class CallLogger:
         try:
             rows = conn.execute(
                 """
-                SELECT id, username, created_at
+                SELECT id, username, role, created_at
                 FROM users
                 ORDER BY username ASC
                 """
@@ -367,7 +422,7 @@ class CallLogger:
                 """,
                 (
                     user_id, model, provider_name, provider_base_url,
-                    provider_api_key, provider_api_type, provider_model,
+                    encrypt_secret(provider_api_key), provider_api_type, provider_model,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -385,14 +440,20 @@ class CallLogger:
             rows = conn.execute(
                 """
                 SELECT id, model, provider_name, provider_base_url,
-                       provider_api_type, provider_model, created_at
+                       provider_api_key, provider_api_type, provider_model, created_at
                 FROM user_routes
                 WHERE user_id = ?
                 ORDER BY created_at DESC
                 """,
                 (user_id,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            result = []
+            for row in rows:
+                item = dict(row)
+                raw_key = item.pop("provider_api_key", "") or ""
+                item["provider_api_key_masked"] = mask_api_key(decrypt_secret(raw_key) or "")
+                result.append(item)
+            return result
         finally:
             conn.close()
             
@@ -409,7 +470,12 @@ class CallLogger:
                 """,
                 (user_id, model),
             ).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            item = dict(row)
+            if item.get("provider_api_key"):
+                item["provider_api_key"] = decrypt_secret(item["provider_api_key"])
+            return item
         finally:
             conn.close()
             
@@ -427,7 +493,14 @@ class CallLogger:
         if not update_fields:
             return False
             
-        values = list(kwargs[k] for k in kwargs.keys() if k in allowed_fields)
+        values = []
+        for k in kwargs.keys():
+            if k not in allowed_fields:
+                continue
+            value = kwargs[k]
+            if k == "provider_api_key" and value:
+                value = encrypt_secret(value)
+            values.append(value)
         values.append(route_id)
         values.append(user_id)
         

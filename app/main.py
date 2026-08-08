@@ -316,6 +316,16 @@ async def get_current_user_flexible(
     return _user_from_access_token(token)
 
 
+async def require_admin(current_user: dict = Depends(get_current_user)):
+    """管理员专用依赖：非 admin 角色一律返回 403。"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要管理员权限",
+        )
+    return current_user
+
+
 # 数据模型
 class UserCreate(BaseModel):
     username: str
@@ -1304,9 +1314,11 @@ async def register(user: UserCreate):
         # bcrypt算法最多支持72字节，自动截断
         hashed_password = get_password_hash(user.password)
         user_id = call_logger.create_user(user.username, hashed_password)
+        role = call_logger.get_user_by_id(user_id)["role"]
         return {
             "user_id": user_id,
             "username": user.username,
+            "role": role,
             "access_token": create_access_token(
                 _access_token_payload(user_id, user.username)
             ),
@@ -1332,7 +1344,22 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             int(user.get("token_version", 0)),
         )
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user["username"],
+        "role": user.get("role", "user"),
+    }
+
+
+@app.get("/v1/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    """返回当前登录用户信息（含角色），供前端刷新权限状态。"""
+    return {
+        "id": current_user["id"],
+        "username": current_user["username"],
+        "role": current_user.get("role", "user"),
+    }
 
 
 # 管理后台页面（React SPA 构建产物）
@@ -1352,9 +1379,9 @@ async def admin_page():
     return FileResponse(admin_index)
 
 
-# 管理API：获取全局路由列表（兼容旧版本）
+# 管理API：获取全局路由列表（仅管理员）
 @app.get("/v1/admin/routes")
-async def get_global_routes(current_user: dict = Depends(get_current_user)):
+async def get_global_routes(current_user: dict = Depends(require_admin)):
     routes = []
     for route in app_config.routes:
         routes.append({
@@ -1365,9 +1392,9 @@ async def get_global_routes(current_user: dict = Depends(get_current_user)):
     return {"routes": routes}
 
 
-# 管理API：获取全局服务商列表（兼容旧版本）
+# 管理API：获取全局服务商列表（仅管理员）
 @app.get("/v1/admin/providers")
-async def get_global_providers(current_user: dict = Depends(get_current_user)):
+async def get_global_providers(current_user: dict = Depends(require_admin)):
     providers = []
     for provider in app_config.providers:
         providers.append({

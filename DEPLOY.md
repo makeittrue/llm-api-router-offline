@@ -39,6 +39,14 @@ cd /opt/llm-api-router
 # Token 有效期（天，可选，默认 7）：
 #   export LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS=30
 
+# 敏感数据加密密钥（建议生产必填）：用户私有路由的 API Key 用 Fernet 加密存储；
+# 生成：openssl rand -base64 32（也兼容 openssl rand -hex 32）。
+# 该密钥不可恢复，务必备份；丢失后已加密的存量 API Key 无法解密。
+#   export ROUTER_DATA_KEY="$(openssl rand -base64 32)"
+
+# 管理员用户名（可选）：设置后该用户自动获得 admin 角色；未设置时首个注册用户为管理员。
+#   export LLM_ROUTER_ADMIN_USERNAME="admin"
+
 # 配置全局服务商（可选，所有用户共用的大模型配置）
 vim config.yaml
 ```

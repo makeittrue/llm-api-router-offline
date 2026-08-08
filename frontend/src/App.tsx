@@ -14,7 +14,7 @@ import type { DashboardStats, DefaultRouteConfig, TabId } from "@/types/api";
 import { formatCurrencyTotals, formatTokens } from "@/utils/format";
 
 export default function App() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isAdmin } = useAuth();
   const [activeTab, setActiveTab] = useState<TabId>("routes");
   const [tokenModalOpen, setTokenModalOpen] = useState(false);
   const [stats, setStats] = useState<DashboardStats>({
@@ -30,11 +30,12 @@ export default function App() {
     if (!isAuthenticated) return;
     const fetchGlobalStats = async () => {
       try {
-        const [summaryData, providersData, routesData] = await Promise.all([
+        // 「全局服务商」是管理员接口，普通用户跳过 providerCount 统计
+        const [summaryData, routesData] = await Promise.all([
           getLogSummary(),
-          getGlobalProviders(),
           getUserRoutes(),
         ]);
+        const providersData = isAdmin ? await getGlobalProviders() : null;
         
         let totalCalls = 0;
         let totalTokens = 0;
@@ -51,7 +52,7 @@ export default function App() {
         
         setStats({
           routeCount: routesData.routes.length,
-          providerCount: providersData.providers.length,
+          providerCount: providersData?.providers.length ?? 0,
           totalCalls,
           totalTokens,
           totalCost: formatCurrencyTotals(currencyTotals),
@@ -61,7 +62,7 @@ export default function App() {
       }
     };
     fetchGlobalStats();
-  }, [isAuthenticated]);
+  }, [isAuthenticated, isAdmin]);
 
   const handleRouteStats = useCallback(
     (routeCount: number, models: string[], defaultRoute: DefaultRouteConfig) => {

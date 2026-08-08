@@ -19,6 +19,11 @@ services:
       # - LLM_ROUTER_JWT_SECRET=请替换为 openssl rand -hex 32 的输出
       # Token 有效天数（可选，默认 7）
       # - LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS=30
+      # 敏感数据加密密钥（建议生产必填）：用户私有路由 API Key 用 Fernet 加密存储
+      # 生成：openssl rand -base64 32；该密钥不可恢复，务必备份，丢失后存量 Key 无法解密
+      # - ROUTER_DATA_KEY=请替换为 openssl rand -base64 32 的输出
+      # 管理员用户名（可选）：设置后该用户自动获得 admin 角色；未设置时首个注册用户为管理员
+      # - LLM_ROUTER_ADMIN_USERNAME=admin
     restart: always
     logging:
       driver: "json-file"

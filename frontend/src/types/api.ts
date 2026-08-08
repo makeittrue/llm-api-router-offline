@@ -1,6 +1,14 @@
 export interface AuthResponse {
   access_token: string;
   token_type: string;
+  username?: string;
+  role?: string;
+}
+
+export interface MeInfo {
+  id: number;
+  username: string;
+  role: string;
 }
 
 export interface UserRoute {
@@ -10,6 +18,7 @@ export interface UserRoute {
   provider_base_url: string;
   provider_model: string;
   provider_api_type: string;
+  provider_api_key_masked?: string;
   created_at: string;
 }
 

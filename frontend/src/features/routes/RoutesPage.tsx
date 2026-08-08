@@ -204,6 +204,7 @@ export function RoutesPage({ onStatsChange }: RoutesPageProps) {
                 <Th>模型名称</Th>
                 <Th>服务商</Th>
                 <Th>服务商模型</Th>
+                <Th>API Key</Th>
                 <Th>API 地址</Th>
                 <Th>创建时间</Th>
                 <Th>操作</Th>
@@ -215,6 +216,9 @@ export function RoutesPage({ onStatsChange }: RoutesPageProps) {
                   <Td className="font-medium text-slate-900">{route.model}</Td>
                   <Td>{route.provider_name}</Td>
                   <Td>{route.provider_model}</Td>
+                  <Td className="font-mono text-xs text-slate-500">
+                    {route.provider_api_key_masked || "未配置"}
+                  </Td>
                   <Td className="max-w-xs truncate">{route.provider_base_url}</Td>
                   <Td>{formatDateTime(route.created_at)}</Td>
                   <Td>

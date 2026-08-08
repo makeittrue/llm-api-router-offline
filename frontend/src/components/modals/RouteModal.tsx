@@ -155,13 +155,26 @@ export function RouteModal({
           onChange={(event) => setProviderBaseUrl(event.target.value)}
           placeholder="https://api.openai.com"
         />
-        <Input
-          label={`API Key ${route ? "" : "*"}`}
-          type="password"
-          value={providerApiKey}
-          onChange={(event) => setProviderApiKey(event.target.value)}
-          placeholder={route ? "留空表示不修改" : "你的 API Key"}
-        />
+        <div>
+          <Input
+            label={`API Key ${route ? "" : "*"}`}
+            type="password"
+            value={providerApiKey}
+            onChange={(event) => setProviderApiKey(event.target.value)}
+            placeholder={
+              route?.provider_api_key_masked
+                ? `已配置 ${route.provider_api_key_masked}，留空表示不修改`
+                : route
+                  ? "留空表示不修改"
+                  : "你的 API Key"
+            }
+          />
+          {route?.provider_api_key_masked ? (
+            <p className="mt-1 text-xs text-slate-500">
+              已配置：{route.provider_api_key_masked}（为保护密钥安全，仅展示脱敏值；留空保存将保持不变）
+            </p>
+          ) : null}
+        </div>
         <Input
           label="服务商模型名 *"
           value={providerModel}

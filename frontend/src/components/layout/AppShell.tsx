@@ -22,12 +22,19 @@ const navItems: Array<{ id: TabId; label: string; icon: typeof ListTree }> = [
   { id: "notifications", label: "通知设置", icon: Bell },
 ];
 
+// 「全局服务商」仅管理员可见
+function visibleNavItems(isAdmin: boolean) {
+  return isAdmin ? navItems : navItems.filter((item) => item.id !== "providers");
+}
+
 interface SidebarProps {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
 }
 
 export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
+  const { isAdmin } = useAuth();
+  const items = visibleNavItems(isAdmin);
   return (
     <aside className="hidden w-64 shrink-0 border-r border-slate-200 bg-white lg:flex lg:flex-col">
       <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-5">
@@ -42,7 +49,7 @@ export function Sidebar({ activeTab, onTabChange }: SidebarProps) {
         </div>
       </div>
       <nav className="flex-1 space-y-1 p-3">
-        {navItems.map(({ id, label, icon: Icon }) => (
+        {items.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             type="button"
@@ -70,7 +77,7 @@ interface HeaderProps {
 }
 
 export function Header({ activeTab, onTabChange, onShowToken }: HeaderProps) {
-  const { username, logout } = useAuth();
+  const { username, isAdmin, logout } = useAuth();
   const [healthy, setHealthy] = useState(true);
 
   useEffect(() => {
@@ -82,6 +89,8 @@ export function Header({ activeTab, onTabChange, onShowToken }: HeaderProps) {
     return () => window.clearInterval(timer);
   }, []);
 
+  const items = visibleNavItems(isAdmin);
+
   return (
     <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
       <div className="flex flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
@@ -91,7 +100,7 @@ export function Header({ activeTab, onTabChange, onShowToken }: HeaderProps) {
               控制台
             </p>
             <h1 className="text-xl font-semibold text-slate-900">
-              {navItems.find((item) => item.id === activeTab)?.label}
+              {items.find((item) => item.id === activeTab)?.label}
             </h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -114,6 +123,11 @@ export function Header({ activeTab, onTabChange, onShowToken }: HeaderProps) {
             <span className="hidden text-sm text-slate-600 sm:inline">
               {username ? `欢迎，${username}` : ""}
             </span>
+            {isAdmin ? (
+              <span className="inline-flex items-center rounded-full bg-brand-50 px-2.5 py-0.5 text-xs font-medium text-brand-700">
+                管理员
+              </span>
+            ) : null}
             <Button variant="secondary" size="sm" onClick={onShowToken}>
               <KeyRound className="h-4 w-4" />
               我的 Token
@@ -125,7 +139,7 @@ export function Header({ activeTab, onTabChange, onShowToken }: HeaderProps) {
           </div>
         </div>
         <div className="flex gap-2 overflow-x-auto lg:hidden">
-          {navItems.map(({ id, label }) => (
+          {items.map(({ id, label }) => (
             <button
               key={id}
               type="button"

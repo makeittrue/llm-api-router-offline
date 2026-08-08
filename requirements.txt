@@ -11,3 +11,5 @@ python-jose[cryptography]
 bcrypt>=4.0.0
 python-multipart
 tiktoken>=0.7.0
+# 用户路由 API Key 应用级加密（Fernet），随 python-jose[cryptography] 安装但显式声明
+cryptography

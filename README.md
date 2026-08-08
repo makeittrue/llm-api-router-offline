@@ -44,17 +44,17 @@ SQLite存储所有调用记录，包含调用时间、token使用量、耗时、
 
 ### P4 — 安全：用户路由 API Key
 
-- [ ] 选定应用级加密方案（如 Fernet + 环境变量 `ROUTER_DATA_KEY`），文档说明密钥轮换与备份要求
-- [ ] `user_routes.provider_api_key`：写入前加密、读出解密；兼容存量明文的一次性迁移（启动时或独立迁移脚本）
-- [ ] 管理后台与 API：列表/表单仅展示脱敏 Key（如 `sk-***abcd`），不向浏览器返回完整明文
-- [ ] README：与「加密存储」实际行为一致；补充数据密钥丢失后的不可恢复说明
+- [x] 应用级加密方案：Fernet + 环境变量 `ROUTER_DATA_KEY`；未配置时明文模式并告警，密钥轮换与备份要求见下方「敏感数据加密」
+- [x] `user_routes.provider_api_key`：写入前加密、读出解密；存量明文在启动时自动一次性加密迁移
+- [x] 管理后台与 API：列表/表单仅展示脱敏 Key（如 `sk-***abcd`），不向浏览器返回完整明文
+- [x] README：与「加密存储」实际行为一致；补充数据密钥丢失后的不可恢复说明
 
 ### P5 — 权限：管理员与普通用户
 
-- [ ] 数据模型：`users` 表增加 `role`（admin/user）或 `is_admin`；迁移策略：首个注册用户为 admin，或由环境变量指定管理员用户名
-- [ ] FastAPI：`require_admin` 依赖，校验 JWT 与库中角色一致
-- [ ] `GET /v1/admin/routes`、`GET /v1/admin/providers` 仅管理员可访问，普通用户返回 403
-- [ ] `frontend/` 管理后台：非管理员隐藏「全局服务商/路由」或只读提示，与 API 行为一致
+- [x] 数据模型：`users` 表增加 `role`（admin/user）；首个注册用户为 admin，或由环境变量 `LLM_ROUTER_ADMIN_USERNAME` 指定管理员用户名
+- [x] FastAPI：`require_admin` 依赖，校验 JWT 与库中角色一致
+- [x] `GET /v1/admin/routes`、`GET /v1/admin/providers` 仅管理员可访问，普通用户返回 403
+- [x] `frontend/` 管理后台：非管理员隐藏「全局服务商」入口，仅展示自己的路由/日志/用量；管理员显示角色徽标
 
 ### P2 — 计费 MVP
 
@@ -123,9 +123,27 @@ SQLite存储所有调用记录，包含调用时间、token使用量、耗时、
 | `LLM_ROUTER_JWT_SECRET` | **必填** | 用于签发与校验用户 JWT 的 HMAC 密钥；**长度须 ≥ 16**（代码校验），生产建议使用 `openssl rand -hex 32`。 |
 | `SECRET_KEY` | 二选一 | 仅当**未设置** `LLM_ROUTER_JWT_SECRET` 时作为回退；**若两者同时存在，始终以 `LLM_ROUTER_JWT_SECRET` 为准**。 |
 | `LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS` | 可选 | 访问令牌有效天数，正整数，**默认 `7`**。 |
+| `ROUTER_DATA_KEY` | **建议** | 用户私有路由 API Key 的应用级加密密钥（Fernet）。**建议生产环境必填**；未设置时密钥以明文入库并发出告警，仅限本地开发。生成：`openssl rand -base64 32`（也兼容 `openssl rand -hex 32`）。**丢失该密钥后，已加密的存量 API Key 无法恢复**。 |
+| `LLM_ROUTER_ADMIN_USERNAME` | 可选 | 指定管理员用户名（登录时命中即授予 admin 角色，优先级最高）。未设置时，**系统首个注册用户自动成为管理员**。 |
 
 - 同一台机器上若已有其它应用使用通用名 `SECRET_KEY`（如 Django / Flask），为避免网关误读他人配置，**请为本项目单独设置 `LLM_ROUTER_JWT_SECRET`**，而不要依赖 `SECRET_KEY`。
 - 若上述两个密钥变量均未设置，服务会使用**仅适用于本地开发**的内置默认密钥，并在导入 `app.utils` 时发出 `UserWarning`。**生产部署必须设置 `LLM_ROUTER_JWT_SECRET`（或足够长的 `SECRET_KEY`）。**
+
+### 敏感数据加密（ROUTER_DATA_KEY）
+
+用户私有路由中的上游 `API Key` 采用 **Fernet（对称加密）** 存储：
+
+- 设置 `ROUTER_DATA_KEY` 后，写入路由时加密、读取转发时解密，数据库与 API 响应中**永不返回完整明文**（列表/表单只展示脱敏值，如 `sk-***abcd`）。
+- 密钥生成：`openssl rand -base64 32`（也兼容 `openssl rand -hex 32` 的 64 位十六进制串）。
+- **未设置时处于明文模式**：密钥直接入库并发出 `UserWarning`，仅限本地开发，生产环境务必配置。
+- **存量数据迁移**：配置 `ROUTER_DATA_KEY` 后首次启动会自动把已存在的明文 API Key 加密入库（Fernet 密文以 `gAAAAA` 开头，已加密的不会重复处理）。
+- **密钥轮换与备份**：`ROUTER_DATA_KEY` 属于**不可恢复密钥**，请备份到安全位置（如密码管理器）。轮换密钥需先解密再以新密钥加密全部存量数据，否则旧数据将无法解密；**丢失密钥 = 丢失所有用户路由的上游 Key**，只能由用户重新填写。
+
+### 管理员与普通用户（role）
+
+- `users` 表含 `role` 字段（`admin` / `user`）。**首个注册用户自动成为管理员**；也可设置 `LLM_ROUTER_ADMIN_USERNAME` 指定管理员用户名（优先级最高，且每次启动都会校验该用户角色）。
+- `GET /v1/admin/routes`、`GET /v1/admin/providers` 仅管理员可访问，普通用户返回 `403`；前端对非管理员隐藏「全局服务商」入口。
+- 登录/注册响应与 `GET /v1/me` 返回 `role` 字段；角色变更即时生效（JWT 本身不携带角色，权限以库中为准）。
 
 ### 1. 安装依赖
 ```bash
@@ -533,7 +551,7 @@ context:
 每个用户可以在管理后台独立添加自己的私有路由：
 - 私有路由优先级高于全局路由，如果用户的私有路由和全局路由模型名相同，优先使用用户自己的配置
 - 用户可以配置任意兼容OpenAI格式的服务商API
-- 用户的API密钥会加密存储在数据库中，只有用户自己可以使用
+- 用户的API密钥配置 `ROUTER_DATA_KEY` 后加密存储（详见「敏感数据加密」），列表与表单仅展示脱敏值；未配置时明文入库并告警（仅限开发）
 - 支持路由的增删改查操作，实时生效
 
 ## API 文档
