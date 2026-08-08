@@ -136,13 +136,25 @@ curl -I http://localhost:8000/admin
 
 ### 方式二：Docker 部署（适合网络环境良好的服务器）
 
-#### 1. 克隆代码并修改配置
+#### 1. 克隆代码并准备配置
 
 ```bash
 git clone <你的仓库地址> /opt/llm-api-router
 cd /opt/llm-api-router
-# 设置环境变量 LLM_ROUTER_JWT_SECRET（及可选的 config.yaml），同上节「配置核心参数」
+
+# 敏感配置写入 .env（已被 gitignore，不会提交到仓库）
+cp .env.example .env
+vim .env
 ```
+
+`.env` 需要填写（生成方式见文件内注释）：
+
+| 变量 | 生产 | 说明 |
+|------|------|------|
+| `LLM_ROUTER_JWT_SECRET` | **必填** | `openssl rand -hex 32`；**升级已有部署时务必沿用原值，否则全员 Token 失效** |
+| `ROUTER_DATA_KEY` | 建议 | `openssl rand -base64 32`；不可恢复，丢失后存量 API Key 无法解密 |
+| `LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS` | 可选 | 访问 Token 有效天数，默认 7 |
+| `LLM_ROUTER_ADMIN_USERNAME` | 可选 | 指定管理员用户名；未设置时首个注册用户为管理员 |
 
 Dockerfile 使用多阶段构建：先在 Node 20 阶段执行 `npm ci && npm run build` 生成 `static/admin/`，再复制到 Python 运行镜像中。通常不需要在宿主机手动构建前端。
 
@@ -161,7 +173,17 @@ sudo systemctl enable docker --now
 mkdir -p data
 sudo chmod 755 data/
 
-# 启动服务
+# 创建 config.yaml（可选，全局服务商/路由；参考 README「配置说明」）
+# 若仓库没有现成 config.yaml，可先创建最小配置：
+cat > config.yaml <<'EOF'
+server:
+  host: "0.0.0.0"
+  port: 8000
+log:
+  db_path: "logs.db"
+EOF
+
+# 启动服务（docker compose 会自动读取项目根目录的 .env）
 sudo docker compose up -d --build
 ```
 
@@ -175,6 +197,47 @@ curl -I http://localhost:8000/admin
 ```
 
 ***
+
+## 从旧版本升级（已有用户）
+
+升级到包含「API Key 加密 / 管理员角色」的版本时，按下面步骤操作，**不影响现有用户使用**（存量 Token 继续有效、私有路由照常转发）。
+
+```bash
+cd /opt/llm-api-router
+
+# 1) 备份数据库（必做）
+sudo cp data/logs.db data/logs.db.bak.$(date +%Y%m%d)
+
+# 2) 如果 git pull 报「local changes would be overwritten」：
+#    - 服务器上 app/utils.py 若被手工改过密钥（硬编码 JWT），一律丢弃：
+#      git checkout -- app/utils.py && rm -f utils.py
+#    - docker-compose.yml 的本地改动先备份再暂存：
+#      cp docker-compose.yml /tmp/docker-compose.yml.local
+#      git stash push -- docker-compose.yml
+git pull
+
+# 3) 配置 .env（重要）：
+#    - LLM_ROUTER_JWT_SECRET 必须沿用旧版本签发 Token 时的密钥值！
+#      旧密钥可能来自两处：app/utils.py 里的硬编码，或旧版 docker-compose.yml
+#      的 environment 段——找到旧值后抄到 .env；否则重启后所有用户 Token 失效。
+#    - ROUTER_DATA_KEY：首次配置时自动把存量明文 API Key 加密迁移
+cp .env.example .env && vim .env
+
+# 4) 重新构建并重启（自动重建前端 + 自动迁移数据库）
+sudo docker compose up -d --build
+
+# 5) 验证
+curl http://localhost:8000/health
+curl -I http://localhost:8000/admin
+```
+
+升级后自动完成：
+
+- `users` 表新增 `role` 列；**无管理员时最早注册用户自动成为管理员**（除非 `.env` 设置了 `LLM_ROUTER_ADMIN_USERNAME`）
+- 配置了 `ROUTER_DATA_KEY` 时，存量明文 API Key 启动时自动加密迁移
+- 普通用户将看不到「全局服务商」页，直接调用 `/v1/admin/providers`、`/v1/admin/routes` 返回 403
+
+> 常见问题：`sqlite3.OperationalError: no such column: role` —— 说明容器还在跑旧代码，按上述步骤重新 `docker compose up -d --build` 并重启后该列会自动创建。
 
 ## 公网访问配置
 

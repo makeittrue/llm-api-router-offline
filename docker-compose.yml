@@ -15,15 +15,17 @@ services:
     environment:
       # 时区设置，和服务器本地时间一致
       - TZ=Asia/Shanghai
-      # 生产环境务必设置 JWT 密钥，长度须 >= 16（勿将含真实密钥的 compose 提交到仓库）
-      # - LLM_ROUTER_JWT_SECRET=请替换为 openssl rand -hex 32 的输出
-      # Token 有效天数（可选，默认 7）
-      # - LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS=30
-      # 敏感数据加密密钥（建议生产必填）：用户私有路由 API Key 用 Fernet 加密存储
-      # 生成：openssl rand -base64 32；该密钥不可恢复，务必备份，丢失后存量 Key 无法解密
-      # - ROUTER_DATA_KEY=请替换为 openssl rand -base64 32 的输出
-      # 管理员用户名（可选）：设置后该用户自动获得 admin 角色；未设置时首个注册用户为管理员
-      # - LLM_ROUTER_ADMIN_USERNAME=admin
+      # 敏感配置从项目根目录 .env 读取（.env 已被 gitignore，不会提交到仓库）。
+      # 首次部署请复制 .env.example 为 .env 并填写：
+      #   LLM_ROUTER_JWT_SECRET          必填（openssl rand -hex 32）
+      #   ROUTER_DATA_KEY                建议必填（openssl rand -base64 32，不可恢复）
+      #   LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS  可选，默认 7
+      #   LLM_ROUTER_ADMIN_USERNAME      可选，指定管理员用户名
+      # 未设置时以下变量为空串，应用自动使用开发默认值并发出告警。
+      - LLM_ROUTER_JWT_SECRET=${LLM_ROUTER_JWT_SECRET}
+      - LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS=${LLM_ROUTER_ACCESS_TOKEN_EXPIRE_DAYS}
+      - ROUTER_DATA_KEY=${ROUTER_DATA_KEY}
+      - LLM_ROUTER_ADMIN_USERNAME=${LLM_ROUTER_ADMIN_USERNAME}
     restart: always
     logging:
       driver: "json-file"

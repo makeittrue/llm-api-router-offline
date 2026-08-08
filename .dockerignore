@@ -43,6 +43,7 @@ static/admin/
 # 本地配置
 .env
 .local
+config.yaml
 config.yaml.local
 
 # Docker相关
