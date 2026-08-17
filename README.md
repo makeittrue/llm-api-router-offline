@@ -489,7 +489,7 @@ routes:
 
 网关可基于 `call_logs` 按规则估算每次调用的费用（默认按每 1M token 计费，单位由 `unit` 指定）。规则按 `provider` + `provider_model_patterns` 匹配，支持 `token_tiers`（按输入 token 分档）与 `time_windows`（按时段/日期覆盖价格），`time_windows` 命中后覆盖基础价格并记录在日志的 `matched_window` 中。
 
-**DeepSeek 峰谷定价备注（2026-08）**：DeepSeek API 即将采用峰谷定价，**高峰时段价格为平时的 2 倍，适用所有计费项**；高峰时段定义为**北京时间每日 9:00～12:00 和 14:00～18:00**（具体生效时间以官方正式通知为准）。可通过 `time_windows` 配置实现，例如：
+**DeepSeek 峰谷定价备注（2026-08）**：DeepSeek API 于 2026-08-17 起正式采用峰谷定价，**高峰时段价格为空闲时段的 2 倍，适用所有计费项**；高峰时段定义为**北京时间每日 9:00～12:00 和 14:00～18:00**（其余为空闲时段，基础价即空闲时段价格）。可通过 `time_windows` 配置实现，例如（deepseek-v4-flash / deepseek-chat / deepseek-reasoner）：
 
 ```yaml
 billing:
@@ -500,27 +500,27 @@ billing:
       provider_aliases: ["deepseek"]
       provider_model_patterns: ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"]
       match_mode: "exact"
-      input_price: 1.0
-      output_price: 2.0
-      cache_read_price: 0.02
-      cache_write_price: 1.0
+      input_price: 1.5
+      output_price: 4.5
+      cache_read_price: 0.05
+      cache_write_price: 1.5
       time_windows:
         - name: "peak-9-12"
           timezone: "Asia/Shanghai"
           start_time: "09:00"
           end_time: "12:00"
-          input_price: 2.0
-          output_price: 4.0
-          cache_read_price: 0.04
-          cache_write_price: 2.0
+          input_price: 3.0
+          output_price: 9.0
+          cache_read_price: 0.10
+          cache_write_price: 3.0
         - name: "peak-14-18"
           timezone: "Asia/Shanghai"
           start_time: "14:00"
           end_time: "18:00"
-          input_price: 2.0
-          output_price: 4.0
-          cache_read_price: 0.04
-          cache_write_price: 2.0
+          input_price: 3.0
+          output_price: 9.0
+          cache_read_price: 0.10
+          cache_write_price: 3.0
 ```
 
 `time_windows` 支持 `timezone`（默认 UTC，建议 `Asia/Shanghai`）、`start_time`/`end_time`（每日起止）、`start_at`/`end_at`（日期区间）、`weekdays`（星期限定）；同一规则内从上到下匹配首个命中的窗口。完整字段说明以 `app/config.py` 中 `BillingConfig` 为准。
