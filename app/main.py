@@ -49,6 +49,10 @@ notification_scheduler_stop: asyncio.Event | None = None
 DEFAULT_ROUTE_MODEL = "default"
 _FEISHU_RECEIVE_ID_TYPES = {"open_id", "user_id", "union_id", "email", "chat_id"}
 
+# 轻量日志配置：保证未捕获异常的 traceback 稳定输出到 stderr（uvicorn/systemd/docker 日志均可见）。
+# 与 uvicorn 自带 logger（propagate=False）互不干扰；root 已有 handler 时不会重复添加。
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,6 +100,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """兜底异常：完整 traceback 进服务端日志，客户端只收到通用 500（不泄露内部细节）。
+
+    正常路径（上游错误、模型未找到等）都会在业务层转为 4xx/5xx JSON，
+    走到这里的都是未预期异常（如 SQLite 锁、序列化失败等）。
+    """
+    logger.error(
+        "Unhandled exception on %s %s",
+        request.method,
+        request.url.path,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "message": "Internal server error",
+                "type": "internal_server_error",
+                "code": "internal_error",
+            }
+        },
+    )
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")

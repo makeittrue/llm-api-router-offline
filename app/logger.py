@@ -94,6 +94,10 @@ class CallLogger:
     def _init_db(self):
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
+        # 开启 WAL：读者不阻塞写者、写者不阻塞读者，避免多 worker 下
+        # 日志写入与管理后台查询并发时偶发 "database is locked" 导致的 500。
+        # journal_mode 持久化到库文件，此后所有连接自动生效。
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS call_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
