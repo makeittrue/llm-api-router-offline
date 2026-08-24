@@ -51,6 +51,21 @@ def _usage_dict(u: Any) -> dict[str, Any] | None:
     return None
 
 
+def _truncate_message_to_fit(dumped: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """单条消息序列化长度超过 max_chars 时，对字符串 content 截断以适配预算。"""
+    content = dumped.get("content")
+    if not isinstance(content, str):
+        return dumped
+    overhead = len(json.dumps({**dumped, "content": ""}, ensure_ascii=False))
+    truncated = content[: max(max_chars - overhead, 0)]
+    candidate = {**dumped, "content": truncated}
+    # 转义字符可能使实际序列化长度超出预算，循环缩小直到适配
+    while truncated and len(json.dumps(candidate, ensure_ascii=False)) > max_chars:
+        truncated = truncated[: len(truncated) // 2]
+        candidate = {**dumped, "content": truncated}
+    return candidate
+
+
 def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
     roles: list[str] = []
     message_chars: list[dict[str, Any]] = []
@@ -844,28 +859,48 @@ class CallLogger:
                 usage_raw = dict(stream_usage)
 
             try:
-                messages_json = json.dumps(
-                    [m.model_dump(mode="python", exclude_none=True) for m in request.messages],
-                    ensure_ascii=False,
-                )
+                dumped_messages = [
+                    m.model_dump(mode="python", exclude_none=True) for m in request.messages
+                ]
+                messages_json = json.dumps(dumped_messages, ensure_ascii=False)
             except (TypeError, ValueError) as e:
+                dumped_messages = []
                 messages_json = json.dumps(
                     [{"role": "system", "content": f"[request_messages 无法序列化: {e}]"}],
                     ensure_ascii=False,
                 )
             if len(messages_json) > _MAX_LOG_JSON_CHARS:
-                messages_json = json.dumps(
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                f"[日志已截断] 原始 messages JSON 长度 {len(messages_json)}，"
-                                f"超过上限 {_MAX_LOG_JSON_CHARS}，未写入完整内容。"
-                            ),
-                        }
-                    ],
-                    ensure_ascii=False,
+                # 在消息边界处截断，保留前面的完整消息；单条超限消息对 content 做字符串截断。
+                # 预算计入末尾提示消息与方括号，保证最终写入值不超过 _MAX_LOG_JSON_CHARS。
+                note_prefix = (
+                    f"[日志已截断] 原始 messages JSON 长度 {len(messages_json)}，"
+                    f"超过上限 {_MAX_LOG_JSON_CHARS}，仅保留前 "
                 )
+                note_suffix = " 条消息。"
+                # 计数位数未知，先按最大可能（全部消息数）估算 note 长度来分配预算
+                budget = _MAX_LOG_JSON_CHARS - 2 - len(
+                    json.dumps(
+                        {"role": "system", "content": note_prefix + f"{len(dumped_messages)}" + note_suffix},
+                        ensure_ascii=False,
+                    )
+                )
+                kept: list[dict[str, Any]] = []
+                kept_chars = 0
+                for m in dumped_messages:
+                    item = json.dumps(m, ensure_ascii=False)
+                    # +2 为消息间分隔符（json.dumps 默认 ", " 逗号+空格），首条多算 2 字符，保守不超限
+                    item_len = len(item) + 2
+                    if kept_chars + item_len <= budget:
+                        kept.append(m)
+                        kept_chars += item_len
+                    elif not kept:
+                        fitted = _truncate_message_to_fit(m, budget - 2)
+                        kept.append(fitted)
+                        kept_chars += len(json.dumps(fitted, ensure_ascii=False)) + 2
+                    else:
+                        break
+                note = {"role": "system", "content": note_prefix + f"{len(kept)}" + note_suffix}
+                messages_json = json.dumps(kept + [note], ensure_ascii=False)
 
             log_meta_json: str | None = None
             if log_meta is not None:
