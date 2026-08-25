@@ -33,6 +33,7 @@ from app.responses_bridge import (
     responses_sse_from_openai_sse,
     responses_to_chat_request,
 )
+from app.balance import query_all_balances
 from app.config import AppConfig, load_config, ProviderConfig
 from app.logger import CallLogger, build_request_log_meta
 from app.models import ChatCompletionRequest, ModelListResponse
@@ -1437,6 +1438,13 @@ async def get_global_providers(current_user: dict = Depends(require_admin)):
 @app.get("/v1/admin/billing/providers")
 async def get_billing_providers(current_user: dict = Depends(get_current_user)):
     return {"providers": _billing_provider_options()}
+
+
+# 管理API：查询各上游服务商账户实时余额（仅管理员）
+@app.get("/v1/admin/providers/balance")
+async def get_providers_balance(current_user: dict = Depends(require_admin)):
+    providers = await query_all_balances(app_config.providers)
+    return {"providers": providers}
 
 
 # ========== 用户路由管理接口 ==========

@@ -7,6 +7,7 @@ import type {
   LogSummaryItem,
   LogsResponse,
   MeInfo,
+  ProviderBalance,
   ProviderOption,
   UserRoute,
 } from "@/types/api";
@@ -66,6 +67,12 @@ export async function getBillingProviders() {
 
 export async function getGlobalProviders() {
   return fetchJson<{ providers: GlobalProvider[] }>("/v1/admin/providers");
+}
+
+export async function getProviderBalances() {
+  return fetchJson<{ providers: ProviderBalance[] }>(
+    "/v1/admin/providers/balance",
+  );
 }
 
 export async function getLogs(params: {

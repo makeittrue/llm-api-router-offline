@@ -40,6 +40,24 @@ export interface GlobalProvider {
   api_type: string;
 }
 
+export interface ProviderBalanceItem {
+  currency: string;
+  available_balance: number | null;
+  components?: Record<string, number | null>;
+}
+
+export interface ProviderBalance {
+  name: string;
+  base_url: string;
+  vendor: string | null;
+  supported: boolean;
+  status: "ok" | "error" | "unsupported";
+  is_available: boolean | null;
+  balances: ProviderBalanceItem[];
+  error: string | null;
+  queried_at?: string | null;
+}
+
 export interface CallLog {
   id: number;
   created_at: string;
