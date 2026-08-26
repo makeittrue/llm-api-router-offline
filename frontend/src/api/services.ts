@@ -9,6 +9,7 @@ import type {
   MeInfo,
   ProviderBalance,
   ProviderOption,
+  RouteBalance,
   UserRoute,
 } from "@/types/api";
 
@@ -73,6 +74,10 @@ export async function getProviderBalances() {
   return fetchJson<{ providers: ProviderBalance[] }>(
     "/v1/admin/providers/balance",
   );
+}
+
+export async function getUserRouteBalances() {
+  return fetchJson<{ routes: RouteBalance[] }>("/v1/user/routes/balance");
 }
 
 export async function getLogs(params: {

@@ -1448,6 +1448,27 @@ async def get_providers_balance(current_user: dict = Depends(require_admin)):
 
 
 # ========== 用户路由管理接口 ==========
+@app.get("/v1/user/routes/balance")
+async def get_user_routes_balance(current_user: dict = Depends(get_current_user)):
+    """用私有路由自身配置的 API Key 查询上游余额（仅 DeepSeek/Moonshot/智谱 支持）。"""
+    routes = call_logger.get_user_routes_with_secrets(current_user["id"])
+    providers = [
+        ProviderConfig(
+            name=route["model"],
+            base_url=route["provider_base_url"],
+            api_key=route.get("provider_api_key") or "",
+            api_type=route.get("provider_api_type") or "openai",
+        )
+        for route in routes
+    ]
+    results = await query_all_balances(providers)
+    # 附带路由标识，前端按 model 映射（model 对单个用户唯一）
+    for route, item in zip(routes, results):
+        item["route_id"] = route["id"]
+        item["model"] = route["model"]
+    return {"routes": results}
+
+
 @app.get("/v1/user/routes")
 async def get_user_routes(current_user: dict = Depends(get_current_user)):
     routes = call_logger.get_user_routes(current_user["id"])

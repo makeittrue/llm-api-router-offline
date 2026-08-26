@@ -169,7 +169,7 @@ async def query_provider_balance(provider: ProviderConfig) -> dict[str, Any]:
 
     if not provider.api_key:
         result["status"] = "error"
-        result["error"] = "API key 未配置（环境变量未设置或为空）"
+        result["error"] = "API Key 未配置，请在服务商或路由中填写"
         return result
 
     parts = urlsplit(provider.base_url)

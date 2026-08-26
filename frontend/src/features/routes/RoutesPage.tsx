@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import {
   createUserRoute,
   deleteUserRoute,
   getBillingProviders,
   getDefaultRoute,
+  getUserRouteBalances,
   getUserRoutes,
   updateDefaultRoute,
   updateUserRoute,
 } from "@/api/services";
 import { Button } from "@/components/ui/Button";
+import { BalanceCell } from "@/components/ui/BalanceCell";
 import {
   EmptyState,
   LoadingState,
@@ -24,6 +26,7 @@ import { RouteModal } from "@/components/modals/RouteModal";
 import { useToast } from "@/context/ToastContext";
 import type {
   DefaultRouteConfig,
+  ProviderBalance,
   ProviderOption,
   UserRoute,
 } from "@/types/api";
@@ -46,6 +49,25 @@ export function RoutesPage({ onStatsChange }: RoutesPageProps) {
   const [savingDefault, setSavingDefault] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingRoute, setEditingRoute] = useState<UserRoute | null>(null);
+  const [routeBalanceMap, setRouteBalanceMap] = useState<Record<string, ProviderBalance>>({});
+  const [balanceLoading, setBalanceLoading] = useState(false);
+
+  // 用各路由自身配置的 API Key 查询上游余额（仅 DeepSeek/Moonshot/智谱 支持）
+  const refreshRouteBalances = useCallback(async () => {
+    setBalanceLoading(true);
+    try {
+      const data = await getUserRouteBalances();
+      const map: Record<string, ProviderBalance> = {};
+      for (const item of data.routes) {
+        map[item.model] = item;
+      }
+      setRouteBalanceMap(map);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "查询余额失败", "error");
+    } finally {
+      setBalanceLoading(false);
+    }
+  }, [showToast]);
 
   const loadData = async () => {
     setLoading(true);
@@ -64,6 +86,8 @@ export function RoutesPage({ onStatsChange }: RoutesPageProps) {
         routesData.routes.map((route) => route.model),
         defaultData,
       );
+      // 加载完成后自动查询一次余额，无需手动点击
+      if (routesData.routes.length > 0) void refreshRouteBalances();
     } catch (error) {
       showToast(error instanceof Error ? error.message : "加载路由失败", "error");
     } finally {
@@ -146,15 +170,28 @@ export function RoutesPage({ onStatsChange }: RoutesPageProps) {
             配置模型映射与上游服务商，支持 default 自动降级链。
           </p>
         </div>
-        <Button
-          onClick={() => {
-            setEditingRoute(null);
-            setModalOpen(true);
-          }}
-        >
-          <Plus className="h-4 w-4" />
-          新增路由
-        </Button>
+        <div className="flex items-center gap-2">
+          {routes.length > 0 ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={refreshRouteBalances}
+              disabled={balanceLoading}
+            >
+              <RefreshCw className="h-4 w-4" />
+              {balanceLoading ? "查询中..." : "查询余额"}
+            </Button>
+          ) : null}
+          <Button
+            onClick={() => {
+              setEditingRoute(null);
+              setModalOpen(true);
+            }}
+          >
+            <Plus className="h-4 w-4" />
+            新增路由
+          </Button>
+        </div>
       </div>
 
       <div className="rounded-xl border border-brand-100 bg-brand-50/60 p-5">
@@ -205,6 +242,7 @@ export function RoutesPage({ onStatsChange }: RoutesPageProps) {
                 <Th>服务商</Th>
                 <Th>服务商模型</Th>
                 <Th>API Key</Th>
+                <Th>实时余额</Th>
                 <Th>API 地址</Th>
                 <Th>创建时间</Th>
                 <Th>操作</Th>
@@ -218,6 +256,13 @@ export function RoutesPage({ onStatsChange }: RoutesPageProps) {
                   <Td>{route.provider_model}</Td>
                   <Td className="font-mono text-xs text-slate-500">
                     {route.provider_api_key_masked || "未配置"}
+                  </Td>
+                  <Td>
+                    {balanceLoading && !routeBalanceMap[route.model] ? (
+                      <span className="text-slate-400">查询中...</span>
+                    ) : (
+                      <BalanceCell balance={routeBalanceMap[route.model]} />
+                    )}
                   </Td>
                   <Td className="max-w-xs truncate">{route.provider_base_url}</Td>
                   <Td>{formatDateTime(route.created_at)}</Td>

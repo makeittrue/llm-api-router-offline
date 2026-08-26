@@ -475,7 +475,31 @@ class CallLogger:
             return result
         finally:
             conn.close()
-            
+
+    def get_user_routes_with_secrets(self, user_id: int) -> list[dict[str, Any]]:
+        """内部使用：返回用户路由列表且 provider_api_key 为解密后的明文（仅限服务端内部，如余额查询）。"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, model, provider_name, provider_base_url,
+                       provider_api_key, provider_api_type, provider_model, created_at
+                FROM user_routes
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["provider_api_key"] = decrypt_secret(item.get("provider_api_key") or "") or ""
+                result.append(item)
+            return result
+        finally:
+            conn.close()
+
     def get_user_route_by_model(self, user_id: int, model: str) -> dict[str, Any] | None:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row

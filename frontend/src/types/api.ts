@@ -58,6 +58,12 @@ export interface ProviderBalance {
   queried_at?: string | null;
 }
 
+// 用户私有路由余额（/v1/user/routes/balance），附带路由标识
+export interface RouteBalance extends ProviderBalance {
+  route_id: number;
+  model: string;
+}
+
 export interface CallLog {
   id: number;
   created_at: string;

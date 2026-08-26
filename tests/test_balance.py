@@ -205,7 +205,7 @@ class QueryProviderBalanceTests(unittest.IsolatedAsyncioTestCase):
             _provider("deepseek", "https://api.deepseek.com", api_key="")
         )
         self.assertEqual(result["status"], "error")
-        self.assertIn("API key", result["error"])
+        self.assertIn("API Key", result["error"])
 
     async def test_transport_error(self):
         client = mock.AsyncMock()
