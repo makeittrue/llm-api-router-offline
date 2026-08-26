@@ -30,9 +30,11 @@ export function RouteModal({
   const [providerModel, setProviderModel] = useState("");
   const [providerApiType, setProviderApiType] = useState("openai");
   const [saving, setSaving] = useState(false);
+  const [validationError, setValidationError] = useState("");
 
   useEffect(() => {
     if (!open) return;
+    setValidationError("");
     if (route) {
       const isPreset = providers.some((item) => item.name === route.provider_name);
       setModel(route.model);
@@ -61,6 +63,7 @@ export function RouteModal({
   }, [providerSelect, customProviderName]);
 
   const handleProviderChange = (value: string) => {
+    setValidationError("");
     setProviderSelect(value);
     if (value && value !== CUSTOM_PROVIDER) {
       const provider = providers.find((item) => item.name === value);
@@ -72,12 +75,18 @@ export function RouteModal({
   };
 
   const handleSubmit = async () => {
-    if (!model.trim() || !effectiveProviderName || !providerBaseUrl.trim() || !providerModel.trim()) {
+    const missing: string[] = [];
+    if (!model.trim()) missing.push("模型名称");
+    if (!effectiveProviderName) missing.push("服务商名称");
+    if (!providerBaseUrl.trim()) missing.push("API 地址");
+    if (!providerModel.trim()) missing.push("服务商模型名");
+    if (!route && !providerApiKey.trim()) missing.push("API Key");
+    if (missing.length > 0) {
+      setValidationError(`请填写必填项：${missing.join("、")}`);
       return;
     }
-    if (!route && !providerApiKey.trim()) {
-      return;
-    }
+
+    setValidationError("");
 
     const payload: Record<string, string> = {
       model: model.trim(),
@@ -115,11 +124,22 @@ export function RouteModal({
         </>
       }
     >
+      {validationError ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+        >
+          {validationError}
+        </div>
+      ) : null}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Input
           label="模型名称 *"
           value={model}
-          onChange={(event) => setModel(event.target.value)}
+          onChange={(event) => {
+            setValidationError("");
+            setModel(event.target.value);
+          }}
           placeholder="例如: my-gpt-4"
         />
         <div>
@@ -140,7 +160,10 @@ export function RouteModal({
             <div className="mt-2">
               <Input
                 value={customProviderName}
-                onChange={(event) => setCustomProviderName(event.target.value)}
+                onChange={(event) => {
+                  setValidationError("");
+                  setCustomProviderName(event.target.value);
+                }}
                 placeholder="请输入自定义服务商名称"
               />
             </div>
@@ -152,7 +175,10 @@ export function RouteModal({
         <Input
           label="API 地址 *"
           value={providerBaseUrl}
-          onChange={(event) => setProviderBaseUrl(event.target.value)}
+          onChange={(event) => {
+            setValidationError("");
+            setProviderBaseUrl(event.target.value);
+          }}
           placeholder="https://api.openai.com"
         />
         <div>
@@ -160,7 +186,10 @@ export function RouteModal({
             label={`API Key ${route ? "" : "*"}`}
             type="password"
             value={providerApiKey}
-            onChange={(event) => setProviderApiKey(event.target.value)}
+            onChange={(event) => {
+              setValidationError("");
+              setProviderApiKey(event.target.value);
+            }}
             placeholder={
               route?.provider_api_key_masked
                 ? `已配置 ${route.provider_api_key_masked}，留空表示不修改`
@@ -178,7 +207,10 @@ export function RouteModal({
         <Input
           label="服务商模型名 *"
           value={providerModel}
-          onChange={(event) => setProviderModel(event.target.value)}
+          onChange={(event) => {
+            setValidationError("");
+            setProviderModel(event.target.value);
+          }}
           placeholder="例如: gpt-4o"
         />
         <Select

@@ -96,22 +96,6 @@ export function ProvidersPage({ onStatsChange }: ProvidersPageProps) {
   const [balanceMap, setBalanceMap] = useState<Record<string, ProviderBalance>>({});
   const [balanceLoading, setBalanceLoading] = useState(false);
 
-  useEffect(() => {
-    const load = async () => {
-      setLoading(true);
-      try {
-        const data = await getGlobalProviders();
-        setProviders(data.providers);
-        onStatsChange(data.providers.length);
-      } catch (error) {
-        showToast(error instanceof Error ? error.message : "加载服务商失败", "error");
-      } finally {
-        setLoading(false);
-      }
-    };
-    load();
-  }, [onStatsChange, showToast]);
-
   const refreshBalances = useCallback(async () => {
     setBalanceLoading(true);
     try {
@@ -127,6 +111,24 @@ export function ProvidersPage({ onStatsChange }: ProvidersPageProps) {
       setBalanceLoading(false);
     }
   }, [showToast]);
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      try {
+        const data = await getGlobalProviders();
+        setProviders(data.providers);
+        onStatsChange(data.providers.length);
+        // 进入页面自动查询一次余额，无需手动点击
+        if (data.providers.length > 0) void refreshBalances();
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : "加载服务商失败", "error");
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [onStatsChange, showToast, refreshBalances]);
 
   if (loading) return <LoadingState />;
   if (providers.length === 0) {
