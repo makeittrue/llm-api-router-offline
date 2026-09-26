@@ -9,6 +9,7 @@ from typing import Any
 
 from app.billing import calculate_request_cost
 from app.config import BillingConfig
+from app.pricing_catalog import PricingCatalog
 from app.models import ChatCompletionRequest, ChatCompletionResponse
 from app.utils import data_key_configured, decrypt_secret, encrypt_secret, mask_api_key
 
@@ -101,9 +102,15 @@ def build_request_log_meta(request: ChatCompletionRequest) -> dict[str, Any]:
 
 
 class CallLogger:
-    def __init__(self, db_path: str = "logs.db", billing_config: BillingConfig | None = None):
+    def __init__(
+        self,
+        db_path: str = "logs.db",
+        billing_config: BillingConfig | None = None,
+        pricing_catalog: PricingCatalog | None = None,
+    ):
         self.db_path = db_path
         self.billing_config = billing_config
+        self.pricing_catalog = pricing_catalog
         self._init_db()
 
     def _init_db(self):
@@ -948,6 +955,7 @@ class CallLogger:
                     completion_tokens=ct,
                     usage_raw=usage_raw,
                     created_at=created_at,
+                    pricing_catalog=self.pricing_catalog,
                 )
 
             billing_meta_json: str | None = None

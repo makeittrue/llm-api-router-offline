@@ -6,6 +6,7 @@ import {
   KeyRound,
   ListTree,
   LogOut,
+  Tags,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { checkHealth } from "@/api/client";
@@ -17,14 +18,19 @@ import type { TabId } from "@/types/api";
 const navItems: Array<{ id: TabId; label: string; icon: typeof ListTree }> = [
   { id: "routes", label: "我的路由", icon: ListTree },
   { id: "providers", label: "全局服务商", icon: Cloud },
+  { id: "pricing", label: "模型价格", icon: Tags },
   { id: "logs", label: "调用日志", icon: Activity },
   { id: "charts", label: "用量统计", icon: BarChart3 },
   { id: "notifications", label: "通知设置", icon: Bell },
 ];
 
-// 「全局服务商」仅管理员可见
+// 「全局服务商」「模型价格」仅管理员可见
+const ADMIN_ONLY_TABS: TabId[] = ["providers", "pricing"];
+
 function visibleNavItems(isAdmin: boolean) {
-  return isAdmin ? navItems : navItems.filter((item) => item.id !== "providers");
+  return isAdmin
+    ? navItems
+    : navItems.filter((item) => !ADMIN_ONLY_TABS.includes(item.id));
 }
 
 interface SidebarProps {

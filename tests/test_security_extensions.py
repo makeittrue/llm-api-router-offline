@@ -167,6 +167,30 @@ class AdminRoleTests(unittest.TestCase):
         )
         self.assertEqual(self.client.get("/v1/admin/routes").status_code, 200)
 
+    def test_model_pricing_endpoint_is_admin_only(self):
+        """模型价格页数据接口：普通用户 403，管理员可见（无远程目录时返回空目录）。"""
+        original_catalog = main.pricing_catalog
+        try:
+            main.pricing_catalog = None
+            main.app.dependency_overrides[main.get_current_user] = lambda: {
+                "id": 2, "username": "staff", "role": "user",
+            }
+            self.assertEqual(
+                self.client.get("/v1/admin/billing/pricing/models").status_code, 403
+            )
+
+            main.app.dependency_overrides[main.get_current_user] = lambda: {
+                "id": 1, "username": "boss", "role": "admin",
+            }
+            response = self.client.get("/v1/admin/billing/pricing/models")
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body["rules"], [])
+            self.assertEqual(body["remote"]["total"], 0)
+            self.assertFalse(body["status"]["enabled"])
+        finally:
+            main.pricing_catalog = original_catalog
+
     def test_me_returns_role(self):
         main.app.dependency_overrides[main.get_current_user] = lambda: {
             "id": 1, "username": "boss", "role": "admin",

@@ -7,6 +7,8 @@ import type {
   LogSummaryItem,
   LogsResponse,
   MeInfo,
+  ModelPricingResponse,
+  PricingCatalogStatus,
   ProviderBalance,
   ProviderOption,
   RouteBalance,
@@ -74,6 +76,29 @@ export async function getProviderBalances() {
   return fetchJson<{ providers: ProviderBalance[] }>(
     "/v1/admin/providers/balance",
   );
+}
+
+export async function getModelPricing(params: {
+  provider?: string;
+  q?: string;
+  offset?: number;
+  limit?: number;
+}) {
+  const search = new URLSearchParams({
+    offset: String(params.offset ?? 0),
+    limit: String(params.limit ?? 50),
+  });
+  if (params.provider) search.set("provider", params.provider);
+  if (params.q) search.set("q", params.q);
+  return fetchJson<ModelPricingResponse>(
+    `/v1/admin/billing/pricing/models?${search.toString()}`,
+  );
+}
+
+export async function refreshRemotePricing() {
+  return fetchJson<PricingCatalogStatus>("/v1/admin/billing/pricing/refresh", {
+    method: "POST",
+  });
 }
 
 export async function getUserRouteBalances() {

@@ -34,9 +34,11 @@ from app.responses_bridge import (
     responses_to_chat_request,
 )
 from app.balance import query_all_balances
+from app.billing import describe_billing_rules, match_yaml_rule_for_catalog_model
 from app.config import AppConfig, load_config, ProviderConfig
 from app.logger import CallLogger, build_request_log_meta
 from app.models import ChatCompletionRequest, ModelListResponse
+from app.pricing_catalog import PricingCatalog
 from app.providers.base import BaseProvider, UpstreamError, create_provider
 from app.router import Router
 from app.usage_notifications import UsageNotificationService
@@ -44,6 +46,9 @@ from app.usage_notifications import UsageNotificationService
 app_config: AppConfig | None = None
 router: Router | None = None
 call_logger: CallLogger | None = None
+pricing_catalog: PricingCatalog | None = None
+pricing_scheduler_task: asyncio.Task | None = None
+pricing_scheduler_stop: asyncio.Event | None = None
 notification_service: UsageNotificationService | None = None
 notification_scheduler_task: asyncio.Task | None = None
 notification_scheduler_stop: asyncio.Event | None = None
@@ -60,11 +65,34 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global app_config, router, call_logger
+    global pricing_catalog, pricing_scheduler_task, pricing_scheduler_stop
     global notification_service, notification_scheduler_task, notification_scheduler_stop
 
     app_config = load_config()
     router = Router(app_config)
-    call_logger = CallLogger(app_config.log.db_path, app_config.billing)
+
+    # 远程模型价格：启动时读本地缓存（不阻塞事件循环），随后由后台任务定时刷新。
+    pricing_catalog = None
+    pricing_scheduler_task = None
+    pricing_scheduler_stop = None
+    if app_config.billing.remote_pricing.enabled:
+        pricing_catalog = PricingCatalog(app_config.billing.remote_pricing)
+        try:
+            await asyncio.to_thread(pricing_catalog.load_cache_sync)
+        except Exception as e:
+            print(f"[WARN] 加载模型价格缓存失败，将由后台刷新获取: {e}")
+
+    call_logger = CallLogger(app_config.log.db_path, app_config.billing, pricing_catalog)
+
+    if pricing_catalog is not None:
+        try:
+            pricing_scheduler_stop = asyncio.Event()
+            pricing_scheduler_task = asyncio.create_task(
+                pricing_catalog.run_scheduler(pricing_scheduler_stop)
+            )
+        except Exception as e:
+            print(f"[WARN] 启动模型价格后台刷新失败，已跳过: {e}")
+
     notification_service = None
     notification_scheduler_task = None
     notification_scheduler_stop = None
@@ -90,6 +118,13 @@ async def lifespan(application: FastAPI):
                 await notification_scheduler_task
             except Exception as e:
                 print(f"[WARN] 用量通知调度退出异常: {e}")
+        if pricing_scheduler_stop is not None:
+            pricing_scheduler_stop.set()
+        if pricing_scheduler_task is not None:
+            try:
+                await pricing_scheduler_task
+            except Exception as e:
+                print(f"[WARN] 模型价格调度退出异常: {e}")
 
 
 app = FastAPI(title="LLM API Router", version="1.0.0", lifespan=lifespan)
@@ -1438,6 +1473,58 @@ async def get_global_providers(current_user: dict = Depends(require_admin)):
 @app.get("/v1/admin/billing/providers")
 async def get_billing_providers(current_user: dict = Depends(get_current_user)):
     return {"providers": _billing_provider_options()}
+
+
+# 管理API：查看后台远程价格（models.dev）目录状态（仅管理员）
+@app.get("/v1/admin/billing/pricing")
+async def get_remote_pricing_status(current_user: dict = Depends(require_admin)):
+    if pricing_catalog is None:
+        return {**app_config.billing.remote_pricing.model_dump(), "enabled": False}
+    return pricing_catalog.status()
+
+
+# 管理API：手动强制刷新远程价格目录（仅管理员）
+@app.post("/v1/admin/billing/pricing/refresh")
+async def refresh_remote_pricing(current_user: dict = Depends(require_admin)):
+    if pricing_catalog is None:
+        raise HTTPException(status_code=400, detail="远程价格目录未启用")
+    ok = await pricing_catalog.refresh(force=True)
+    status_info = pricing_catalog.status()
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"刷新失败: {status_info.get('last_error')}")
+    return status_info
+
+
+# 管理API：模型价格页数据（yaml 生效规则 + models.dev 远程目录）（仅管理员）
+@app.get("/v1/admin/billing/pricing/models")
+async def get_model_pricing(
+    provider: str | None = None,
+    q: str | None = None,
+    offset: int = 0,
+    limit: int = 100,
+    current_user: dict = Depends(require_admin),
+):
+    rules = describe_billing_rules(app_config.billing, pricing_catalog)
+    if pricing_catalog is None:
+        return {
+            "rules": rules,
+            "remote": {"total": 0, "items": [], "providers": [], "usd_to_cny": app_config.billing.remote_pricing.usd_to_cny},
+            "status": {**app_config.billing.remote_pricing.model_dump(), "enabled": False},
+        }
+    listing = pricing_catalog.list_entries(
+        provider_id=provider,
+        query=q,
+        offset=max(offset, 0),
+        limit=min(max(limit, 1), 500),
+    )
+    for item in listing["items"]:
+        rule = match_yaml_rule_for_catalog_model(
+            app_config.billing, pricing_catalog, item["provider_id"], item["model"]
+        )
+        item["covered_by"] = (
+            {"provider": rule.provider, "match_mode": rule.match_mode} if rule is not None else None
+        )
+    return {"rules": rules, "remote": listing, "status": pricing_catalog.status()}
 
 
 # 管理API：查询各上游服务商账户实时余额（仅管理员）

@@ -115,7 +115,13 @@ export interface FeishuNotificationSettings {
   message?: string;
 }
 
-export type TabId = "routes" | "providers" | "logs" | "charts" | "notifications";
+export type TabId =
+  | "routes"
+  | "providers"
+  | "logs"
+  | "charts"
+  | "notifications"
+  | "pricing";
 
 export interface RouteFormData {
   model: string;
@@ -132,4 +138,77 @@ export interface DashboardStats {
   totalCalls: number;
   totalTokens: number | string;
   totalCost: string;
+}
+
+// ========== 模型价格（/v1/admin/billing/pricing/models） ==========
+export interface PriceSet {
+  input_price: number | null;
+  output_price: number | null;
+  cache_read_price: number | null;
+  cache_write_price: number | null;
+}
+
+// models.dev 原始价格键名（USD / CNY）
+export interface RawPriceSet {
+  input: number | null;
+  output: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+}
+
+export type BillingPriceSource =
+  | "yaml"
+  | "yaml+models.dev"
+  | "yaml-missing-price";
+
+export interface BillingRulePricing {
+  provider: string;
+  provider_aliases: string[];
+  provider_model_patterns: string[];
+  match_mode: string;
+  currency: string | null;
+  unit: number;
+  yaml_prices: PriceSet;
+  token_tier_count: number;
+  time_window_count: number;
+  source_url: string | null;
+  note: string | null;
+  effective: BillingPriceSource;
+  remote_full_id: string | null;
+  remote_prices: PriceSet | null;
+}
+
+export interface RemotePricingEntry {
+  provider_id: string;
+  model: string;
+  full_id: string;
+  usd: RawPriceSet;
+  cny: RawPriceSet;
+  source_url: string;
+  covered_by: { provider: string; match_mode: string } | null;
+}
+
+export interface PricingCatalogStatus {
+  enabled: boolean;
+  loaded?: boolean;
+  source?: string | null;
+  provider_count?: number;
+  entry_count?: number;
+  last_refresh_at?: string | null;
+  last_error?: string | null;
+  last_cache_write_error?: string | null;
+  cache_path?: string;
+  cache_age_seconds?: number | null;
+  usd_to_cny?: number;
+}
+
+export interface ModelPricingResponse {
+  rules: BillingRulePricing[];
+  remote: {
+    total: number;
+    items: RemotePricingEntry[];
+    providers: string[];
+    usd_to_cny: number;
+  };
+  status: PricingCatalogStatus;
 }

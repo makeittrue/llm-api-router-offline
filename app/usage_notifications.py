@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import AppConfig, FeishuConfig, UsageAlertRuleConfig, load_config
 from app.logger import CallLogger
+from app.pricing_catalog import PricingCatalog
 from app.notifiers import FeishuNotifier
 
 _ALERT_METRIC_LABELS = {
@@ -395,7 +396,11 @@ def _parse_cli_date(raw: str | None, default_date: date) -> date:
 
 async def _run_cli_async(args: argparse.Namespace) -> int:
     app_config = load_config(args.config_path)
-    call_logger = CallLogger(app_config.log.db_path, app_config.billing)
+    pricing_catalog: PricingCatalog | None = None
+    if app_config.billing.remote_pricing.enabled:
+        pricing_catalog = PricingCatalog(app_config.billing.remote_pricing)
+        await asyncio.to_thread(pricing_catalog.load_cache_sync)
+    call_logger = CallLogger(app_config.log.db_path, app_config.billing, pricing_catalog)
     service = UsageNotificationService(app_config, call_logger)
 
     if not service.enabled:

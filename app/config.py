@@ -59,8 +59,9 @@ class BillingRuleConfig(BaseModel):
     provider_aliases: list[str] = Field(default_factory=list)
     provider_model_patterns: list[str] = Field(default_factory=list)
     match_mode: str = "exact"
-    input_price: float = Field(default=0, ge=0)
-    output_price: float = Field(default=0, ge=0)
+    # None 表示「未写价」：可被后台远程价格（models.dev）补齐；显式 0.0 表示免费模型，不会被远程覆盖。
+    input_price: float | None = Field(default=None, ge=0)
+    output_price: float | None = Field(default=None, ge=0)
     cache_read_price: float | None = Field(default=None, ge=0)
     cache_write_price: float | None = Field(default=None, ge=0)
     unit: int = Field(default=1_000_000, ge=1)
@@ -70,6 +71,27 @@ class BillingRuleConfig(BaseModel):
     note: str | None = None
     token_tiers: list[BillingTokenTierConfig] = Field(default_factory=list)
     time_windows: list[BillingTimeWindowConfig] = Field(default_factory=list)
+    # 本条规则在 models.dev 中对应的 provider id（缺省时按 provider/provider_aliases 映射推断）
+    models_dev_provider: str | None = None
+
+
+class RemotePricingConfig(BaseModel):
+    """后台从 models.dev 拉取模型价格：yaml 已写价优先，远程仅补空缺与 yaml 未声明的模型。"""
+
+    enabled: bool = True
+    source_url: str = "https://models.dev/api.json"
+    cache_path: str = ".cache/models-dev-api.json"
+    refresh_interval_seconds: int = Field(default=6 * 3600, ge=60)
+    cache_ttl_seconds: int = Field(default=24 * 3600, ge=60)
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    usd_to_cny: float = Field(default=7.2, gt=0)
+    user_agent: str = "llm-api-router/1.0"
+    # 我们的 provider 名/别名 → models.dev provider id 列表（按优先序），用于跨命名差异的映射
+    provider_aliases: dict[str, list[str]] = Field(default_factory=dict)
+    # 是否对 yaml 中完全没有规则的模型也用远程价计费（关闭后仅刷新已有规则的缺口价）
+    synthesize_unknown_models: bool = True
+    # 前缀匹配的最短长度下限，避免 gpt 之类的短名泛匹配
+    min_prefix_match_length: int = Field(default=5, ge=1)
 
 
 class BillingConfig(BaseModel):
@@ -77,6 +99,7 @@ class BillingConfig(BaseModel):
     default_currency: str = "CNY"
     round_digits: int = Field(default=8, ge=0, le=12)
     rules: list[BillingRuleConfig] = Field(default_factory=list)
+    remote_pricing: RemotePricingConfig = RemotePricingConfig()
 
 
 class FeishuConfig(BaseModel):

@@ -31,6 +31,7 @@ from typing import Any
 
 from app.billing import calculate_request_cost
 from app.config import load_config
+from app.pricing_catalog import PricingCatalog
 
 
 def _parse_created_at(raw: str | None) -> datetime:
@@ -78,6 +79,7 @@ def backfill(
     provider_model: str | None = None,
     dry_run: bool = False,
     rescan_cache: bool = False,
+    pricing_catalog: PricingCatalog | None = None,
 ) -> dict[str, int]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = _row_factory
@@ -138,6 +140,7 @@ def backfill(
             completion_tokens=ct,
             usage_raw=usage_raw,
             created_at=created_at,
+            pricing_catalog=pricing_catalog,
         )
         if result is None:
             stats["skipped_no_rule"] += 1
@@ -204,6 +207,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只打印不写库")
     parser.add_argument("--rescan-cache", action="store_true",
                         help="修复已回补但缓存列(cached_input_tokens/cache_write_tokens/cache_hit_rate)为 0 的记录")
+    parser.add_argument("--no-remote-pricing", action="store_true",
+                        help="忽略 models.dev 本地价格缓存，仅用 config.yaml 规则回补")
     args = parser.parse_args()
 
     app_config = load_config(args.config_path)
@@ -216,12 +221,22 @@ def main() -> int:
         print(f"[ERROR] 数据库不存在: {db_path}", file=sys.stderr)
         return 1
 
+    # 回补只读本地缓存、不联网，保证与运行时价格口径一致。
+    pricing_catalog: PricingCatalog | None = None
+    remote_cfg = app_config.billing.remote_pricing
+    if remote_cfg.enabled and not args.no_remote_pricing:
+        pricing_catalog = PricingCatalog(remote_cfg)
+        if not pricing_catalog.load_cache_sync():
+            print(f"[WARN] 价格缓存不可用，将仅用 config.yaml 规则回补: {pricing_catalog.status().get('last_error')}",
+                  file=sys.stderr)
+
     backfill(
         db_path=db_path,
         billing_config=app_config.billing,
         provider_model=args.provider_model,
         dry_run=args.dry_run,
         rescan_cache=args.rescan_cache,
+        pricing_catalog=pricing_catalog,
     )
     return 0
 

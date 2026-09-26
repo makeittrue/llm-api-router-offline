@@ -7,6 +7,7 @@ import { TokenModal } from "@/components/modals/TokenModal";
 import { ChartsPage } from "@/features/charts/ChartsPage";
 import { LogsPage } from "@/features/logs/LogsPage";
 import { NotificationsPage } from "@/features/notifications/NotificationsPage";
+import { PricingPage } from "@/features/pricing/PricingPage";
 import { ProvidersPage } from "@/features/providers/ProvidersPage";
 import { RoutesPage } from "@/features/routes/RoutesPage";
 import { useAuth } from "@/context/AuthContext";
@@ -124,6 +125,7 @@ export default function App() {
             {activeTab === "providers" ? (
               <ProvidersPage onStatsChange={handleProviderStats} />
             ) : null}
+            {activeTab === "pricing" ? <PricingPage /> : null}
             {activeTab === "logs" ? <LogsPage modelOptions={modelOptions} /> : null}
             {activeTab === "charts" ? (
               <ChartsPage onStatsChange={handleChartStats} />
